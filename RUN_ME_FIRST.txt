@@ -1,0 +1,46 @@
+VTAB REPORTING MANAGER 0.4.0
+================================
+
+1. Extract this ZIP to any local folder.
+2. Open the extracted VTAB-Reporting-Manager-0.4.0 folder in Visual Studio Code.
+3. Open the Visual Studio Code terminal.
+4. Run:
+
+   python start_manager.py
+
+You can also run `python run_manager.py`. If its required packages are not yet
+installed, it now starts the same automatic setup process.
+
+The launcher creates an isolated Python environment, installs the required
+packages, starts the Manager, and opens it in your browser.
+
+Default address:
+http://127.0.0.1:8840
+
+Optional configuration:
+
+   Copy-Item .env.example .env
+
+Then edit .env before starting the application. For any shared or production
+environment, replace VTAB_MANAGER_API_KEY with a long random value.
+
+Useful commands:
+
+   python start_manager.py --no-browser
+   python start_manager.py --port 8850
+   python start_manager.py --reinstall
+
+Source overview:
+
+   manager/main.py          Manager API, wizard, and connector endpoints
+   manager/database.py      SQLite schema and audit storage
+   manager/contracts.py     Validated API contracts
+   manager/engine/          Preflight, provider, health, and rollback engine
+   manager/security.py      Operator and connector authentication
+   manager/static/          Browser interface
+   tests/                   Automated workflow test
+
+The package does not contain report data, credentials, databases, build
+caches, provider tokens, or a prebuilt virtual environment. Cloud provisioning
+requires a scoped Render or DigitalOcean token and explicit confirmation.
+

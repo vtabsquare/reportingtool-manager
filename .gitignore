@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.manager-venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+data/
+*.db
+*.db.*
+*.sqlite
+*.sqlite3
+tests/_runtime/
+.DS_Store
+Thumbs.db

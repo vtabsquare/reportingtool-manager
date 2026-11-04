@@ -1,0 +1,197 @@
+[
+  {
+    "Path": ".env.example",
+    "SHA256": "047237da8837705375225a5a2bc4aa7966b5c4bb6d0e10bbba9f22030f556e6d",
+    "Bytes": 1457
+  },
+  {
+    "Path": ".gitignore",
+    "SHA256": "100cc91a9aa3c07c2ff9c622bed48c0f338416d7721f5043957e6fd64a3b684e",
+    "Bytes": 66
+  },
+  {
+    "Path": "APPLY_0.5.0_UPDATE.md",
+    "SHA256": "8f25536e97febe6a496e61faf425461b9ea7949c0bf66dce1e6e99d349522cc0",
+    "Bytes": 1040
+  },
+  {
+    "Path": "CENTRALIZED_DEPLOYMENT_IMPLEMENTATION.md",
+    "SHA256": "64023d0170fa5cb56a108775c6e035f5496a9d257a0e51fc6c6bfc28413e3ea3",
+    "Bytes": 3852
+  },
+  {
+    "Path": "CHANGELOG_0.5.0.md",
+    "SHA256": "10c13fbecd800724ba0192a14a013194d9565ebd5645684023cc916282a13f37",
+    "Bytes": 1229
+  },
+  {
+    "Path": "docs/PRODUCTION_ACCEPTANCE_CHECKLIST.md",
+    "SHA256": "821f89bcefa88a9703864469282939df1f572dbc6f2bab73f02a2f958884c946",
+    "Bytes": 1431
+  },
+  {
+    "Path": "docs/UPDATE_PIPELINE_IMPLEMENTATION.md",
+    "SHA256": "c9085447f978695fba3133c1dac31e697f736f0d50ddd254fb0ab7a334f8b673",
+    "Bytes": 2471
+  },
+  {
+    "Path": "integrations/common/update_agent.py",
+    "SHA256": "15dc050df58e80d29b0b60dd1075c2cc7b0079a7fda4d2d83048e8af66e67ec4",
+    "Bytes": 5700
+  },
+  {
+    "Path": "integrations/README.md",
+    "SHA256": "aa856235a4037471f37e5b9b6be2cee43067845516ce48d8f546e5c1fb19696f",
+    "Bytes": 844
+  },
+  {
+    "Path": "integrations/reporting_services/CloudWorkspaceUpdateBanner.tsx",
+    "SHA256": "aa217dc629d58f2ef95197cf76bcc48412ceb82ab90ab42d7ee6bd5e731599a3",
+    "Bytes": 1455
+  },
+  {
+    "Path": "manager/__init__.py",
+    "SHA256": "0dce4a82748a5f6f97bd3f4a3d086ed7e7d474a73adebb0ef705caa92b79d41c",
+    "Bytes": 68
+  },
+  {
+    "Path": "manager/config.py",
+    "SHA256": "ed004619a7bd59c4337109eac0fabd66d0154e3b8df7b30b0a087bf09a923590",
+    "Bytes": 3889
+  },
+  {
+    "Path": "manager/configuration.py",
+    "SHA256": "29f32f82baa6e0714541eeab9efae527f9d4cfcccb80419f45aa93f7360e6a2b",
+    "Bytes": 2447
+  },
+  {
+    "Path": "manager/contracts.py",
+    "SHA256": "943e0b77e14065d9b3e550e8241238e4398114689bc8afe5d6fd2e36973d7020",
+    "Bytes": 6345
+  },
+  {
+    "Path": "manager/database.py",
+    "SHA256": "a66447ba3eff4f6d4321ade491f36a3f66f1e62d18584b497558f9bf2aa9499d",
+    "Bytes": 21960
+  },
+  {
+    "Path": "manager/engine/__init__.py",
+    "SHA256": "29fa627b5005ba9fa0bdc99750c28411a4e1d856048833ee6d1c77e3d3fd335e",
+    "Bytes": 274
+  },
+  {
+    "Path": "manager/engine/adapters/__init__.py",
+    "SHA256": "597c39c3b72479d9741b3267cafcba36c32716993c59c24a2a18ac8d882f6fb6",
+    "Bytes": 172
+  },
+  {
+    "Path": "manager/engine/adapters/base.py",
+    "SHA256": "acadd4411478b2f5d21e16fda83fdec7e19526b8ad620388f27063fc3026b534",
+    "Bytes": 1261
+  },
+  {
+    "Path": "manager/engine/adapters/digitalocean.py",
+    "SHA256": "db5416f600532eaab767e49d83cf030713781c9823b045fe9fbb68c34b4cf4ad",
+    "Bytes": 2940
+  },
+  {
+    "Path": "manager/engine/adapters/render.py",
+    "SHA256": "8d93e721224e2493bb894fb009d8adc9c1254c7412c4299c7da37633ef589d6c",
+    "Bytes": 3190
+  },
+  {
+    "Path": "manager/engine/engine.py",
+    "SHA256": "f15a66089b769851498fc433b33699a8e7f6f406b99d95545c96c1e9bede509c",
+    "Bytes": 10906
+  },
+  {
+    "Path": "manager/engine/health.py",
+    "SHA256": "079b455ae796b1e4dce710a5c5627049b2af30041ee6ce5767ffd68eb3289235",
+    "Bytes": 564
+  },
+  {
+    "Path": "manager/engine/profiles.py",
+    "SHA256": "b21bb440210a4f031dcd2bb0fc2d0034487d4fe23e0042776373dd9657ae7e1d",
+    "Bytes": 1966
+  },
+  {
+    "Path": "manager/engine/rollback.py",
+    "SHA256": "7322a59069284d9e87981a48c58922dadd6b7a902eb8ca5931820d3f2b0edb0f",
+    "Bytes": 747
+  },
+  {
+    "Path": "manager/engine/validator.py",
+    "SHA256": "34373fcc959269350b76c12631793415340c978f0a72d375ad48b2b9524dff04",
+    "Bytes": 4578
+  },
+  {
+    "Path": "manager/github_service.py",
+    "SHA256": "77309ea0791f6ee132f8b66c08b6ebd9f6efde66f678bcce693d9b3fad8a7467",
+    "Bytes": 5776
+  },
+  {
+    "Path": "manager/main.py",
+    "SHA256": "b734a13545f71666e092bd35454a54f3c12a0064797b6e00fa223af9be8a5e8f",
+    "Bytes": 59671
+  },
+  {
+    "Path": "manager/security.py",
+    "SHA256": "1050e3d132dc261a84a258e6f4d253eb8a2f83b14ce3615e1892f50524b24798",
+    "Bytes": 1908
+  },
+  {
+    "Path": "manager/static/app.js",
+    "SHA256": "5582a588d5ea267146938af0b8fb22e66160058e8c6ab790a5a2aa74ec37ced2",
+    "Bytes": 43058
+  },
+  {
+    "Path": "manager/static/index.html",
+    "SHA256": "97f7fb8787af95d68dfc496cc58bc9fb52496556325718dda5ec4c6e1ec1f667",
+    "Bytes": 20061
+  },
+  {
+    "Path": "manager/static/styles.css",
+    "SHA256": "cc1d3e002f800b1edbf76fe32484d20f8dc017dece768c286668822d5cdd551a",
+    "Bytes": 38946
+  },
+  {
+    "Path": "README.md",
+    "SHA256": "ec0971244f376f514b87a89e676e590788ccb5dd98f6602d62256fa8bcf914bd",
+    "Bytes": 7048
+  },
+  {
+    "Path": "requirements.txt",
+    "SHA256": "d6f690cd75d07a66b82cc65fd86f1e8a08365ab05b7dcc2ea4f9bc0a7fe0fe35",
+    "Bytes": 131
+  },
+  {
+    "Path": "run_manager.py",
+    "SHA256": "56b0d213625f0179bf2d976bec181b9b7f139ece7efd0da1e6ff3c5f6b942b0f",
+    "Bytes": 2371
+  },
+  {
+    "Path": "RUN_ME_FIRST.txt",
+    "SHA256": "9edc5e32c78f65952cb35846e003bca3567cefbbdc8afd4f77ce228136ea5ced",
+    "Bytes": 1589
+  },
+  {
+    "Path": "start_manager.py",
+    "SHA256": "e39f10f0db5d585f81f0921e8abce9b397f0fa4df24a835b44ca56318fe16e7d",
+    "Bytes": 1195
+  },
+  {
+    "Path": "supabase/manager_schema.sql",
+    "SHA256": "4a40b5600faefc927b0851681ac11d0dabb07db5444913450c7b580ad8e80349",
+    "Bytes": 7790
+  },
+  {
+    "Path": "tests/test_controlled_updates.py",
+    "SHA256": "fcbc84eaeed7824d7dd8cbadcf101a23582de2487beda22cc617354b2d1f5808",
+    "Bytes": 3898
+  },
+  {
+    "Path": "tests/test_manager_flow.py",
+    "SHA256": "cfba60247ef99f8884dacc377e1cf7349f8cf8210c68413f7c37ba0605984f51",
+    "Bytes": 8183
+  }
+]
