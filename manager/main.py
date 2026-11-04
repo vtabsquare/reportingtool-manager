@@ -810,7 +810,7 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
                         },
                         method="POST",
                     )
-                    with urllib.request.urlopen(req, timeout=5) as resp:
+                    with urllib.request.urlopen(req, timeout=40) as resp:
                         logging.info("Dispatched update webhook to %s (HTTP %s)", wh_url, resp.status)
                 except Exception as exc:
                     logging.info("Client update webhook delivery skipped/offline (%s): %s", wh_url, exc)
