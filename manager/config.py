@@ -30,7 +30,7 @@ class Settings:
     supabase_url: str = os.getenv("SUPABASE_URL", os.getenv("VITE_SUPABASE_URL", "")).strip()
     supabase_anon_key: str = os.getenv("SUPABASE_ANON_KEY", os.getenv("VITE_SUPABASE_ANON_KEY", "")).strip()
     supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-    github_token: str = os.getenv("VTAB_GITHUB_TOKEN", "").strip()
+    github_token: str = os.getenv("VTAB_GITHUB_TOKEN", os.getenv("GITHUB_TOKEN", "")).strip()
     github_repository: str = os.getenv("VTAB_GITHUB_REPOSITORY", "").strip()
     github_repository_services: str = os.getenv("GITHUB_REPOSITORY_SERVICES", "").strip()
     github_repository_admin: str = os.getenv("GITHUB_REPOSITORY_ADMIN", "").strip()
