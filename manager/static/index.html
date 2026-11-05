@@ -8,7 +8,7 @@
   <script>
     (()=>{const saved=localStorage.getItem('vtab_manager_theme');document.documentElement.dataset.theme=saved||'dark'})()
   </script>
-  <link rel="stylesheet" href="/assets/styles.css?v=0.6.0">
+  <link rel="stylesheet" href="/assets/styles.css?v=0.6.2">
 </head>
 <body>
   <svg class="svg-library" aria-hidden="true">
@@ -28,6 +28,7 @@
     <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></symbol>
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
   </svg>
 
   <div class="mobile-shade" id="mobileShade"></div>
@@ -87,7 +88,81 @@
 
   <dialog id="configurationDialog" class="configuration-dialog"><form method="dialog" id="configurationForm"><div class="dialog-head"><div class="dialog-title-icon"><svg><use href="#i-settings"/></svg></div><div class="dialog-title"><small>SECURE CLIENT CONFIGURATION</small><h2 id="configurationTitle">Edit configuration</h2><p>Secrets are masked and unchanged masked values are preserved.</p></div><button class="close" type="button" data-close-dialog>×</button></div><input type="hidden" name="client_id"><label>Managed component<select name="infrastructure_id" id="configurationInfrastructure"></select></label><div class="form-grid"><label>Region<input name="region"></label><label>Instance size<input name="instance_size"></label><label class="wide">Domain<input name="domain"></label><label class="wide" id="renderServiceIdRow" style="display:none"><span>Render Service ID (srv-...)</span><input name="render_service_id" placeholder="srv-dbkmh4d9fdbs73bos7u0"></label><label class="wide">Provider configuration (JSON)<textarea name="provider_config_json" rows="6"></textarea></label><label class="wide"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span>Environment variables (JSON)</span><button type="button" class="text-action" id="insertConnectorVars">+ Add connector env vars</button></div><textarea name="environment_variables_json" rows="8"></textarea></label><label class="wide">Change summary<input name="change_summary" required minlength="3" value="Configuration updated by operator"></label><label><input name="sync_provider" type="checkbox"> Synchronize with provider now</label><label>Request-scoped provider token<input name="provider_token" type="password" autocomplete="off"></label></div><div id="configurationHistory" class="configuration-history"></div><div class="dialog-actions"><button class="secondary" type="button" data-close-dialog>Cancel</button><button class="primary" type="submit">Save version</button></div></form></dialog>
 
+  <dialog id="offerDialog" class="large-dialog offer-dialog">
+    <form method="dialog" id="offerForm">
+      <div class="dialog-head">
+        <div class="dialog-title-icon"><svg><use href="#i-rocket"/></svg></div>
+        <div class="dialog-title">
+          <small>RELEASE DISTRIBUTION</small>
+          <h2>Offer release to client companies</h2>
+          <p id="offerReleaseSubtitle">Select the target client environments to receive this update offer.</p>
+        </div>
+        <button class="close" type="button" data-close-dialog aria-label="Close">×</button>
+      </div>
+
+      <input type="hidden" id="offerReleaseId">
+
+      <div class="offer-release-card" id="offerReleaseCard">
+        <div class="offer-release-icon"><svg><use href="#i-box"/></svg></div>
+        <div class="offer-release-meta">
+          <div class="offer-release-top">
+            <span class="badge active" id="offerReleaseComponent">Services</span>
+            <span class="version-chip" id="offerReleaseVersion">v1.0.0</span>
+            <span class="version-chip" id="offerReleaseCommit">commit</span>
+          </div>
+          <small id="offerReleaseNotes">Synchronized from main repository branch</small>
+        </div>
+        <div class="offer-release-status">
+          <span class="badge available">CI Approved</span>
+        </div>
+      </div>
+
+      <div class="offer-toolbar">
+        <div class="offer-search-box">
+          <svg class="offer-search-icon"><use href="#i-search"/></svg>
+          <input type="text" id="offerClientSearch" placeholder="Search companies by name, code, or environment..." autocomplete="off">
+          <button type="button" class="offer-search-clear" id="offerClearSearch" hidden title="Clear search">×</button>
+        </div>
+        <div class="offer-filter-group" id="offerFilterGroup">
+          <button type="button" class="filter-pill active" data-filter="all">All (<span id="offerCountAll">0</span>)</button>
+          <button type="button" class="filter-pill" data-filter="production">Production</button>
+          <button type="button" class="filter-pill" data-filter="staging">Staging</button>
+          <button type="button" class="filter-pill" data-filter="healthy">Healthy</button>
+        </div>
+      </div>
+
+      <div class="offer-selection-bar">
+        <div class="selection-status">
+          <span id="offerSelectionCount">0 companies selected</span>
+        </div>
+        <div class="selection-quick-actions">
+          <button type="button" class="text-action" id="offerSelectAllBtn">Select visible</button>
+          <span class="divider">·</span>
+          <button type="button" class="text-action" id="offerDeselectAllBtn">Clear selection</button>
+        </div>
+      </div>
+
+      <div class="offer-client-list" id="offerClientList"></div>
+
+      <div class="offer-override-notice" id="offerOverrideNotice" hidden>
+        <svg><use href="#i-shield"/></svg>
+        <div>
+          <b>Active Deployment Notice</b>
+          <p id="offerOverrideText"></p>
+        </div>
+      </div>
+
+      <div class="dialog-actions">
+        <button class="secondary" type="button" data-close-dialog>Cancel</button>
+        <button class="primary action-primary" type="submit" id="offerSubmitBtn" disabled>
+          <svg><use href="#i-rocket"/></svg>
+          <span id="offerSubmitLabel">Select a company</span>
+        </button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="tokenDialog" class="token-dialog"><form method="dialog"><div class="dialog-head"><div class="dialog-title-icon"><svg><use href="#i-key"/></svg></div><div class="dialog-title"><small>CONNECTOR REGISTRATION</small><h2>Save these bootstrap credentials</h2><p>These secrets appear once and belong in the client environment's vault.</p></div></div><pre id="bootstrapToken"></pre><div class="dialog-actions"><button class="primary" value="default">I saved the credentials</button></div></form></dialog>
-  <script src="/assets/app.js?v=0.6.1"></script>
+  <script src="/assets/app.js?v=0.6.2"></script>
 </body>
 </html>

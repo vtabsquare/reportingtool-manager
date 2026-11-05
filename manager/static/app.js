@@ -1,4 +1,4 @@
-const state={view:'overview',clients:[],releases:[],deployments:[],tickets:[],audit:[],summary:{},settings:{storageBackend:'sqlite',github:{},repositories:{}},githubReleases:[],key:'',wizardStep:1,wizardClientId:'',wizardBootstrapToken:'',wizardPreflight:null,wizardJobs:[]};
+﻿const state={view:'overview',clients:[],releases:[],deployments:[],tickets:[],audit:[],summary:{},settings:{storageBackend:'sqlite',github:{},repositories:{}},githubReleases:[],key:'',wizardStep:1,wizardClientId:'',wizardBootstrapToken:'',wizardPreflight:null,wizardJobs:[],initialized:false};
 const titles={
   overview:['Overview','Deployment operations and client environment health'],
   deployments:['Deployments','Plan, approve, and monitor controlled client rollouts'],
@@ -44,12 +44,15 @@ async function bootstrap(){
   }catch(error){$('connectionLabel').textContent='Connection failed';notify(error.message,true);$('content').className='content';$('content').innerHTML=empty(error.message)}
 }
 async function loadAll(){
-  $('content').className='content loading';$('content').innerHTML='<div class="loader"></div><p>Loading manager data…</p>';
+  if(!state.initialized){
+    $('content').className='content loading';$('content').innerHTML='<div class="loader"></div><p>Loading manager data…</p>';
+  }
   try{
     const [summary,clients,releases,deployments,tickets,audit,managerSettings]=await Promise.all([
       api('/api/v1/operator/summary'),api('/api/v1/operator/clients'),api('/api/v1/operator/releases'),api('/api/v1/operator/deployments'),api('/api/v1/operator/tickets'),api('/api/v1/operator/audit?limit=250'),api('/api/v1/operator/settings')
     ]);
     Object.assign(state,{summary,clients:clients.clients,releases:releases.releases,deployments:deployments.deployments,tickets:tickets.tickets,audit:audit.events,settings:managerSettings});
+    state.initialized=true;
     $('ticketCount').textContent=state.tickets.filter(ticket=>ticket.status!=='closed').length;
     render();
     if(state.settings.github?.configured)loadGitHubReleases(false);
@@ -80,7 +83,7 @@ function renderPostureCard(){
   return `<article class="panel posture-card"><div class="panel-head"><div><h2>Deployment posture</h2><p>Preflight readiness snapshot</p></div><span class="live-pill"><i></i>Live</span></div><div class="posture-body"><div class="posture-score"><span>${total?Math.round(healthy/total*100):100}</span><small>Health score</small></div><div class="check-list"><div>${icon('check')}<span><b>Client connectors</b><small>${healthy}/${total||0} healthy</small></span></div><div>${icon('check')}<span><b>Verified releases</b><small>${available} available</small></span></div><div>${icon('shield')}<span><b>Approval gate</b><small>Enforced for all deployments</small></span></div></div></div></article>`;
 }
 function renderDeployments(){return `${viewTitle('Deployment operations','Create plans, collect client approval, and monitor the complete rollout history')}<div class="workflow-banner"><div class="workflow-step done"><span>1</span><div><b>Choose client</b><small>Existing or new</small></div></div><i></i><div class="workflow-step"><span>2</span><div><b>Select release</b><small>Published artifacts</small></div></div><i></i><div class="workflow-step"><span>3</span><div><b>Client approval</b><small>Required gate</small></div></div><i></i><div class="workflow-step"><span>4</span><div><b>Deploy & validate</b><small>Health reported</small></div></div></div>${panel('Deployment history','Offered, active, completed, and rolled-back jobs',deploymentTable(state.deployments,false))}`}
-function deploymentTable(rows,compact){if(!rows.length)return empty('No deployment jobs yet.',`<button class="text-action" data-open-deployment>Create the first deployment</button>`);return `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Component</th><th>Target</th><th>Status</th>${compact?'':'<th>Approval</th><th>Created</th><th></th>'}</tr></thead><tbody>${rows.map(row=>`<tr><td><div class="client-name"><span class="client-logo">${esc((row.client_name||'C')[0])}</span><strong>${esc(row.client_name)}</strong></div></td><td>${esc(row.component)}</td><td><span class="version-chip">v${esc(row.target_version)}</span></td><td>${badge(row.status)}</td>${compact?'':`<td>${esc(row.approved_by||'Waiting')}</td><td>${stamp(row.created_at)}</td><td><div class="row-actions">${row.status==='pending_approval'?`<button class="table-action primary-small" data-approve="${row.id}">Approve</button>`:''}${['scheduled','offered','apply_requested','deploying','validating'].includes(row.status)?`<button class="table-action" data-complete-deployment="${row.id}" style="color:var(--green,#30a46c)">Complete</button>`:''}${['pending_approval','scheduled','offered','apply_requested'].includes(row.status)?`<button class="table-action" data-cancel-deployment="${row.id}" style="color:var(--red,#e5484d)">Cancel</button>`:''}</div></td>`}</tr>`).join('')}</tbody></table></div>`}
+function deploymentTable(rows,compact){if(!rows.length)return empty('No deployment jobs yet.',`<button class="text-action" data-open-deployment>Create the first deployment</button>`);return `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Component</th><th>Target</th><th>Status</th>${compact?'':'<th>Approval</th><th>Created</th><th></th>'}</tr></thead><tbody>${rows.map(row=>`<tr><td><div class="client-name"><span class="client-logo">${esc((row.client_name||'C')[0])}</span><strong>${esc(row.client_name)}</strong></div></td><td>${esc(row.component)}</td><td><span class="version-chip">v${esc(row.target_version)}</span></td><td>${badge(row.status)}</td>${compact?'':`<td>${esc(row.approved_by||'Waiting')}</td><td>${stamp(row.created_at)}</td><td><div class="row-actions">${row.status==='pending_approval'?`<button class="table-action primary-small" data-approve="${row.id}">Approve</button>`:''}${['pending_approval','scheduled','offered','apply_requested'].includes(row.status)?`<button class="table-action" data-cancel-deployment="${row.id}" style="color:var(--red,#e5484d)">Cancel</button>`:''}</div></td>`}</tr>`).join('')}</tbody></table></div>`}
 
 function renderReleases(){return `${viewTitle('Release catalog','Build the verified artifact library used by deployment plans',`<div class="row-actions"><button class="secondary view-action" data-sync-github>${icon('refresh')} Sync GitHub</button><button class="secondary view-action" data-open-release>${icon('plus')} Create release</button></div>`)}${renderGitHubReleaseSource()}${panel('Deployable releases','Checksums, channels, and compatibility metadata',releaseTable(state.releases))}`}
 function renderGitHubReleaseSource(){
@@ -121,7 +124,7 @@ function bindActions(){
   document.querySelectorAll('[data-sync-github]').forEach(button=>button.onclick=syncGitHubCandidates);
   document.querySelectorAll('[data-configure-client]').forEach(button=>button.onclick=()=>openConfiguration(button.dataset.configureClient));
   document.querySelectorAll('[data-approve]').forEach(button=>button.onclick=()=>approveDeployment(button.dataset.approve));
-  document.querySelectorAll('[data-complete-deployment]').forEach(button=>button.onclick=()=>completeDeploymentAction(button.dataset.completeDeployment));
+  // Complete button removed — deployments now auto-complete via health check polling.
   document.querySelectorAll('[data-cancel-deployment]').forEach(button=>button.onclick=()=>cancelDeploymentAction(button.dataset.cancelDeployment));
   const insertEnvBtn=$('insertConnectorVars');if(insertEnvBtn)insertEnvBtn.onclick=insertConnectorVariables;
   document.querySelectorAll('.ticket-status').forEach(select=>select.onchange=()=>updateTicket(select.dataset.ticket,select.value));
@@ -259,36 +262,223 @@ async function syncGitHubCandidates(){
     notify(error.message, true);
   }
 }
-async function offerRelease(releaseId){
-  if(!state.clients.length)return notify('Register a client before offering an update.',true);
-  const choices=state.clients.map((item,index)=>`${index+1}. ${item.name}`).join('\n');
-  const selected=Number(prompt(`Offer to which client?\n${choices}`,'1'))-1;
-  const client=state.clients[selected];
-  if(!client)return;
-  const active=state.deployments.find(d=>d.client_id===client.id && !['succeeded','failed','cancelled','rolled_back'].includes(d.status));
-  if(active){
-    const activeVersion=active.target_version||'current';
-    const statusLabel=active.status==='scheduled'?'Offered':active.status;
-    const supersede=confirm(`Client "${client.name}" already has an active deployment (v${activeVersion}, ${statusLabel}).\n\nWould you like to cancel the existing offer and offer this new release instead?`);
-    if(!supersede)return;
-    try{
-      await api(`/api/v1/operator/deployments/${active.id}/cancel`,{method:'POST'});
-      notify('Previous offer cancelled. Offering new release…');
-    }catch(err){
-      return notify(`Failed to cancel existing deployment: ${err.message}`,true);
+let activeOfferRelease = null;
+const selectedOfferClientIds = new Set();
+let offerFilterMode = 'all';
+let offerSearchQuery = '';
+
+function offerRelease(releaseId) {
+  openOfferDialog(releaseId);
+}
+
+function openOfferDialog(releaseId) {
+  if (!state.clients.length) return notify('Register a client before offering an update.', true);
+  activeOfferRelease = state.releases.find(r => r.id === releaseId);
+  if (!activeOfferRelease) return notify('Release not found in catalog.', true);
+
+  const comp = activeOfferRelease.component || 'services';
+  const compLabel = comp.charAt(0).toUpperCase() + comp.slice(1);
+  if ($('offerReleaseId')) $('offerReleaseId').value = releaseId;
+  if ($('offerReleaseComponent')) $('offerReleaseComponent').textContent = compLabel;
+  if ($('offerReleaseVersion')) $('offerReleaseVersion').textContent = `v${activeOfferRelease.version}`;
+  if ($('offerReleaseCommit')) $('offerReleaseCommit').textContent = (activeOfferRelease.git_commit_sha || '').slice(0, 8) || 'commit';
+  if ($('offerReleaseNotes')) $('offerReleaseNotes').textContent = activeOfferRelease.release_notes || 'Approved release ready for rollout';
+
+  // Reset state
+  selectedOfferClientIds.clear();
+  offerSearchQuery = '';
+  offerFilterMode = 'all';
+  if ($('offerClientSearch')) $('offerClientSearch').value = '';
+  if ($('offerClearSearch')) $('offerClearSearch').hidden = true;
+  document.querySelectorAll('#offerFilterGroup .filter-pill').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.filter === 'all');
+  });
+
+  renderOfferClientList();
+  openDialog('offerDialog');
+}
+
+function getFilteredOfferClients() {
+  const query = offerSearchQuery.trim().toLowerCase();
+  return state.clients.filter(client => {
+    if (offerFilterMode === 'production' && client.environment !== 'production') return false;
+    if (offerFilterMode === 'staging' && client.environment !== 'staging') return false;
+    if (offerFilterMode === 'healthy' && client.last_health_status !== 'healthy') return false;
+
+    if (query) {
+      const name = (client.name || '').toLowerCase();
+      const code = (client.code || '').toLowerCase();
+      const env = (client.environment || '').toLowerCase();
+      const db = (client.database_provider || '').toLowerCase();
+      if (!name.includes(query) && !code.includes(query) && !env.includes(query) && !db.includes(query)) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function renderOfferClientList() {
+  const listEl = $('offerClientList');
+  if (!listEl) return;
+
+  const countAll = state.clients.length;
+  const countEl = $('offerCountAll');
+  if (countEl) countEl.textContent = countAll;
+
+  const filtered = getFilteredOfferClients();
+  const comp = activeOfferRelease?.component || 'services';
+
+  if (!filtered.length) {
+    listEl.innerHTML = `<div class="offer-empty-state">No matching client companies found for "${esc(offerSearchQuery)}".</div>`;
+    updateOfferSelectionUI([]);
+    return;
+  }
+
+  listEl.innerHTML = filtered.map(client => {
+    const isSelected = selectedOfferClientIds.has(client.id);
+    const installed = comp === 'services' ? client.installed_services_version : client.installed_admin_version;
+    const activeDep = state.deployments.find(d => 
+      d.client_id === client.id && 
+      !['succeeded', 'failed', 'cancelled', 'rolled_back'].includes(d.status) &&
+      (d.component === comp || !d.component)
+    );
+    const hasActive = Boolean(activeDep);
+
+    return `
+      <article class="offer-client-card ${isSelected ? 'selected' : ''}" data-offer-client-id="${esc(client.id)}">
+        <label class="offer-card-checkbox">
+          <input type="checkbox" ${isSelected ? 'checked' : ''} tabindex="-1">
+          <span class="checkmark"></span>
+        </label>
+        <span class="client-logo">${esc((client.name || 'C')[0])}</span>
+        <div class="offer-client-main">
+          <div class="offer-client-name-row">
+            <strong>${esc(client.name)}</strong>
+            <code class="client-code">${esc(client.code)}</code>
+          </div>
+          <div class="offer-client-details">
+            <span>Installed: <code>v${esc(installed || 'none')}</code></span>
+            <span class="bullet">•</span>
+            <span>${esc(client.database_provider || 'supabase')}</span>
+          </div>
+        </div>
+        <div class="offer-client-tags">
+          ${badge(client.environment)}
+          <span class="health ${esc(client.last_health_status)}"><i></i>${esc(client.last_health_status)}</span>
+          ${hasActive ? `<span class="active-dep-badge" title="Active deployment: v${esc(activeDep.target_version)} (${esc(activeDep.status)})">Active offer (v${esc((activeDep.target_version||'').slice(0, 10))})</span>` : ''}
+        </div>
+      </article>
+    `;
+  }).join('');
+
+  listEl.querySelectorAll('.offer-client-card').forEach(card => {
+    card.onclick = () => {
+      const clientId = card.dataset.offerClientId;
+      if (selectedOfferClientIds.has(clientId)) {
+        selectedOfferClientIds.delete(clientId);
+      } else {
+        selectedOfferClientIds.add(clientId);
+      }
+      renderOfferClientList();
+    };
+  });
+
+  updateOfferSelectionUI(filtered);
+}
+
+function updateOfferSelectionUI(visibleClients = []) {
+  const count = selectedOfferClientIds.size;
+  const countLabel = count === 1 ? '1 company selected' : `${count} companies selected`;
+  if ($('offerSelectionCount')) $('offerSelectionCount').textContent = countLabel;
+
+  const submitBtn = $('offerSubmitBtn');
+  const submitLabel = $('offerSubmitLabel');
+  if (submitBtn && submitLabel) {
+    if (count === 0) {
+      submitBtn.disabled = true;
+      submitLabel.textContent = 'Select a company';
+    } else if (count === 1) {
+      submitBtn.disabled = false;
+      const client = state.clients.find(c => selectedOfferClientIds.has(c.id));
+      submitLabel.textContent = `Offer update to ${client ? client.name : '1 company'}`;
+    } else {
+      submitBtn.disabled = false;
+      submitLabel.textContent = `Offer update to ${count} companies`;
     }
   }
-  try{
-    await api('/api/v1/operator/deployments',{
-      method:'POST',
-      headers:{'Idempotency-Key':`offer:${client.id}:${releaseId}:${Date.now()}`},
-      body:JSON.stringify({client_id:client.id,release_id:releaseId})
-    });
-    notify('Update offered. It will not run until the client administrator chooses Update Now.');
-    await loadAll();
-  }catch(error){
-    notify(error.message,true);
+
+  const comp = activeOfferRelease?.component || 'services';
+  const selectedWithActive = state.clients.filter(c => 
+    selectedOfferClientIds.has(c.id) &&
+    state.deployments.some(d => 
+      d.client_id === c.id && 
+      !['succeeded', 'failed', 'cancelled', 'rolled_back'].includes(d.status) &&
+      (d.component === comp || !d.component)
+    )
+  );
+
+  const noticeEl = $('offerOverrideNotice');
+  const noticeText = $('offerOverrideText');
+  if (noticeEl && noticeText) {
+    if (selectedWithActive.length > 0) {
+      noticeEl.hidden = false;
+      const names = selectedWithActive.map(c => `"${c.name}"`).join(', ');
+      noticeText.textContent = `${selectedWithActive.length} selected client (${names}) already has an active deployment offer. Proceeding will automatically supersede and cancel existing pending offers before broadcasting this update.`;
+    } else {
+      noticeEl.hidden = true;
+    }
   }
+}
+
+async function submitOfferDialog(event) {
+  event.preventDefault();
+  if (!activeOfferRelease || selectedOfferClientIds.size === 0) return;
+
+  const submitBtn = $('offerSubmitBtn');
+  setBusy(submitBtn, true, 'Broadcasting update offer…');
+
+  const releaseId = activeOfferRelease.id;
+  const comp = activeOfferRelease.component || 'services';
+  const selectedClients = state.clients.filter(c => selectedOfferClientIds.has(c.id));
+
+  let successCount = 0;
+  const errors = [];
+
+  for (const client of selectedClients) {
+    try {
+      const active = state.deployments.find(d => 
+        d.client_id === client.id && 
+        !['succeeded', 'failed', 'cancelled', 'rolled_back'].includes(d.status) &&
+        (d.component === comp || !d.component)
+      );
+      if (active) {
+        await api(`/api/v1/operator/deployments/${active.id}/cancel`, { method: 'POST' });
+      }
+
+      await api('/api/v1/operator/deployments', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': `offer:${client.id}:${releaseId}:${Date.now()}` },
+        body: JSON.stringify({ client_id: client.id, release_id: releaseId })
+      });
+      successCount++;
+    } catch (err) {
+      errors.push(`${client.name}: ${err.message}`);
+    }
+  }
+
+  setBusy(submitBtn, false);
+  $('offerDialog').close();
+
+  if (errors.length === 0) {
+    notify(`Update offer successfully sent to ${selectedClients.map(c => c.name).join(', ')}. Client administrators can now choose Update Now.`);
+  } else if (successCount > 0) {
+    notify(`Offered update to ${successCount} company/companies. Issues: ${errors.join('; ')}`, true);
+  } else {
+    notify(`Failed to offer update: ${errors.join('; ')}`, true);
+  }
+
+  await loadAll();
 }
 async function supersedeRelease(releaseId){const candidates=state.releases.filter(item=>item.id!==releaseId&&item.validation_status==='approved');if(!candidates.length)return notify('No approved replacement release is available.',true);const choices=candidates.map((item,index)=>`${index+1}. ${item.component} ${item.version}`).join('\n');const selected=Number(prompt(`Supersede with:\n${choices}`,'1'))-1;if(!candidates[selected])return;try{await api(`/api/v1/operator/releases/${releaseId}/supersede?superseded_by=${encodeURIComponent(candidates[selected].id)}`,{method:'POST'});notify('Release superseded. Existing running versions were not restarted.');await loadAll()}catch(error){notify(error.message,true)}}
 function setClientMode(mode){
@@ -431,4 +621,74 @@ $('wizardNext').onclick=wizardContinue;$('wizardBack').onclick=()=>setWizardStep
 $('releaseComponent').onchange=syncReleaseRepository;
 document.querySelectorAll('.nav-item').forEach(button=>button.onclick=()=>setView(button.dataset.view));
 $('themeToggle').onclick=toggleTheme;$('refreshButton').onclick=loadAll;$('mobileMenu').onclick=()=>toggleMobile(true);$('mobileShade').onclick=()=>toggleMobile(false);$('primaryAction').onclick=openDeployment;
+
+// Offer Dialog Listeners
+const offerSearchInput = $('offerClientSearch');
+if (offerSearchInput) {
+  offerSearchInput.oninput = () => {
+    offerSearchQuery = offerSearchInput.value;
+    if ($('offerClearSearch')) $('offerClearSearch').hidden = !offerSearchQuery;
+    renderOfferClientList();
+  };
+}
+const offerClearBtn = $('offerClearSearch');
+if (offerClearBtn) {
+  offerClearBtn.onclick = () => {
+    if (offerSearchInput) offerSearchInput.value = '';
+    offerSearchQuery = '';
+    offerClearBtn.hidden = true;
+    renderOfferClientList();
+    if (offerSearchInput) offerSearchInput.focus();
+  };
+}
+document.querySelectorAll('#offerFilterGroup .filter-pill').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('#offerFilterGroup .filter-pill').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    offerFilterMode = btn.dataset.filter;
+    renderOfferClientList();
+  };
+});
+const offerSelectAllBtn = $('offerSelectAllBtn');
+if (offerSelectAllBtn) {
+  offerSelectAllBtn.onclick = () => {
+    const visible = getFilteredOfferClients();
+    visible.forEach(c => selectedOfferClientIds.add(c.id));
+    renderOfferClientList();
+  };
+}
+const offerDeselectAllBtn = $('offerDeselectAllBtn');
+if (offerDeselectAllBtn) {
+  offerDeselectAllBtn.onclick = () => {
+    selectedOfferClientIds.clear();
+    renderOfferClientList();
+  };
+}
+const offerFormEl = $('offerForm');
+if (offerFormEl) {
+  offerFormEl.onsubmit = submitOfferDialog;
+}
+
+// Silent in-place deployment refresh — does NOT show the full-page loading spinner.
+// Only updates state.deployments and re-renders if we are on the deployments view.
+async function refreshDeploymentsSilent() {
+  try {
+    const result = await api('/api/v1/operator/deployments');
+    state.deployments = result.deployments || [];
+    if (state.view === 'deployments' || state.view === 'overview') {
+      render();
+    }
+  } catch (_) {
+    // Silently ignore network hiccups during background poll
+  }
+}
+
 bootstrap();
+
+// Auto-refresh when deployments are in active/offered state so status updates automatically.
+// Use silent in-place update to avoid showing the full-page loading spinner.
+setInterval(() => {
+  if (state && state.deployments && state.deployments.some(d => ['scheduled', 'offered', 'apply_requested', 'deploying', 'validating'].includes(d.status))) {
+    refreshDeploymentsSilent();
+  }
+}, 4000);

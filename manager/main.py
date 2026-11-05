@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import hmac
@@ -62,10 +62,22 @@ FORBIDDEN_DIAGNOSTIC_KEYS = {
 }
 
 
+def _background_deployment_reconciler():
+    import time
+    while True:
+        try:
+            time.sleep(3)
+            active = db.all("SELECT id, status FROM deployments WHERE status IN ('scheduled', 'offered', 'apply_requested', 'deploying', 'validating')")
+            for dep in (active or []):
+                finalize_healthy_deployment_if_ready(dep)
+        except Exception:
+            pass
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.encryption_key_bytes
     db.initialize()
+    threading.Thread(target=_background_deployment_reconciler, daemon=True, name="deployment-auto-reconciler").start()
     yield
 
 
@@ -419,86 +431,145 @@ def finalize_healthy_deployment_if_ready(deployment: Any) -> Any:
     target_version = row.get("target_version") or ""
     release = db.one("SELECT * FROM releases WHERE id=?", (row.get("release_id"),)) if row.get("release_id") else None
     target_sha = str((release.get("git_commit_sha") or "") if release else "").lower()
+    if not target_sha and target_version.startswith("commit-"):
+        target_sha = target_version.replace("commit-", "", 1).lower()
 
-    # Locate service URL
-    url = None
-    notes_raw = row.get("agent_notes")
-    if notes_raw:
-        try:
-            notes = json.loads(notes_raw)
-            url = (notes.get("provider", {}) or {}).get("url")
-        except Exception:
-            pass
-    if not url:
-        client = db.one("SELECT services_url, admin_url FROM clients WHERE id=?", (client_id,))
-        if client:
-            url = client.get("services_url") if component == "services" else client.get("admin_url")
-    if not url:
-        infra = db.one("SELECT domain FROM client_infrastructure WHERE client_id=? AND component=? ORDER BY created_at DESC LIMIT 1", (client_id, component))
-        if infra and infra.get("domain"):
-            dom = infra["domain"].strip()
-            url = dom if dom.startswith("http") else f"https://{dom}"
-
-    if not url:
-        return deployment
-
-    url = url.rstrip("/")
-    health_path = "/api/v1/health" if component == "services" else "/api/session"
-    result = HealthCheckService().check(url, health_path, timeout=4)
-    if not result.get("healthy"):
-        return deployment
+    # Collect all candidate endpoints for this client & component
+    client = db.one("SELECT id, name, services_url, admin_url FROM clients WHERE id=?", (client_id,))
+    urls = resolve_client_webhook_endpoints(client, component) if client else []
+    if not urls and client:
+        base = client.get("services_url") if component == "services" else client.get("admin_url")
+        if base:
+            urls = [f"{base.rstrip('/')}/api/v1/update/webhook"]
 
     ready = False
-    # Case A: deploying with health_check stage
-    if status == "deploying" and row.get("stage") == "health_check":
-        ready = True
-    else:
-        # Case B: check /api/v1/update/status
+    failed = False
+    fail_error = None
+    live_found_url = None
+    # Track if any endpoint missed the offer (needs re-dispatch).
+    # Handles the case where the container was restarting at webhook dispatch time.
+    needs_redispatch = False
+
+    for wh_url in urls:
+        base_url = wh_url.replace("/api/v1/update/webhook", "").replace("/api/update/webhook", "").rstrip("/")
+        status_url = f"{base_url}/api/v1/update/status" if component == "services" else f"{base_url}/api/update/status"
+
         try:
             import urllib.request
-            req = urllib.request.Request(f"{url}/api/v1/update/status", headers={"User-Agent": "VTAB-Reporting-Manager"}, method="GET")
+            req = urllib.request.Request(
+                status_url,
+                headers={
+                    "User-Agent": "VTAB-Reporting-Manager",
+                    "X-VTAB-Client-ID": client_id,
+                    "X-VTAB-Agent-Token": "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y",
+                },
+                method="GET"
+            )
             with urllib.request.urlopen(req, timeout=4) as resp:
-                status_data = json.loads(resp.read().decode("utf-8"))
-                live_commit = str(status_data.get("commit_sha") or "").strip().lower()
-                live_ver = str(status_data.get("current_version") or "").strip()
-                update_avail = status_data.get("update_available")
-                active_dep_id = status_data.get("deployment_id")
-                last_status = status_data.get("last_apply_status")
+                if resp.status == 200:
+                    status_data = json.loads(resp.read().decode("utf-8"))
+                    remote_status = str(status_data.get("status") or "").lower()
+                    live_commit = str(status_data.get("current_commit_sha") or status_data.get("commit_sha") or "").strip().lower()
+                    live_ver = str(status_data.get("current_version") or "").strip()
+                    last_error = status_data.get("last_error") or status_data.get("last_apply_message")
+                    update_avail = status_data.get("update_available")
 
-                if target_sha and live_commit and (target_sha.startswith(live_commit[:8]) or live_commit.startswith(target_sha[:8])):
-                    ready = True
-                elif target_version and (live_ver == target_version or target_version in (f"v{live_ver}", f"commit-{live_commit[:12]}")):
-                    ready = True
+                    # Check failure
+                    if remote_status == "failed" or status_data.get("last_apply_status") == "failed":
+                        failed = True
+                        fail_error = last_error or "Update deployment failed on client."
+                        live_found_url = base_url
+                        break
 
+                    # Detect missed offer: deployment is Offered/Scheduled in Manager but
+                    # the client endpoint has no active offer (update_available=False and
+                    # status is idle/interrupted, meaning the original webhook was lost,
+                    # e.g. container was restarting at dispatch time).
+                    if (not update_avail
+                            and remote_status in ("idle", "interrupted", "cancelled")
+                            and status in ("scheduled", "offered")):
+                        needs_redispatch = True
+                        # Continue checking other endpoints; don't break here
+                        continue
+
+                    # Check success / live.
+                    # Only auto-complete when client explicitly says "completed", OR sha/version
+                    # matches AND update_available is False (meaning the client finished applying
+                    # the update and cleared the banner).
+                    # NEVER complete while update_avail is True -- client still has an outstanding offer.
+                    is_sha_match = bool(target_sha and live_commit and (target_sha.startswith(live_commit[:7]) or live_commit.startswith(target_sha[:7])))
+                    is_ver_match = bool(target_version and live_ver and (live_ver == target_version or target_version in (f"v{live_ver}", f"commit-{live_commit[:12]}")))
+
+                    if remote_status == "completed" or ((is_sha_match or is_ver_match) and not update_avail):
+                        ready = True
+                        live_found_url = base_url
+                        break
         except Exception as exc:
-            logging.debug("Could not verify update status at %s: %s", url, exc)
+            logging.debug("Could not verify status at %s: %s", status_url, exc)
+
+    # Re-dispatch the offer webhook to any endpoints that missed it (container restart, etc.)
+    # Apply a per-deployment cooldown of 90 seconds to avoid flooding.
+    if needs_redispatch and not ready and not failed:
+        now_ts = time.time()
+        last_redispatch = _last_offer_redispatch.get(dep_id, 0.0)
+        if now_ts - last_redispatch > 90:
+            _last_offer_redispatch[dep_id] = now_ts
+            logging.info(
+                "Re-dispatching missed update offer webhook for deployment %s"
+                " (client endpoint missed initial dispatch)",
+                dep_id,
+            )
+            threading.Thread(
+                target=dispatch_client_update_webhook,
+                args=(client_id, dep_id),
+                daemon=True,
+            ).start()
+
+    if failed:
+        now = utc_now()
+        db.execute(
+            """UPDATE deployments SET status='failed', stage='failed', error_message=?,
+               finished_at=?, updated_at=? WHERE id=?""",
+            (str(fail_error)[:2000], now, now, dep_id)
+        )
+        release_deployment_lock(dep_id)
+        db.audit("deployment_engine", "deployment.failed", "deployment", dep_id, client_id, {"url": live_found_url, "error": fail_error})
+        return db.one("SELECT d.*,c.name client_name,r.component,r.channel FROM deployments d JOIN clients c ON c.id=d.client_id JOIN releases r ON r.id=d.release_id WHERE d.id=?", (dep_id,)) or row
 
     if ready:
         now = utc_now()
         db.execute(
-            """UPDATE deployments SET status='succeeded',stage='verified_healthy',progress_percent=100,
-               health_verified_at=?,finished_at=?,updated_at=? WHERE id=?""",
-            (now, now, now, dep_id)
+            """UPDATE deployments SET status='succeeded', stage='verified_healthy', progress_percent=100,
+               installed_version=?, installed_commit_sha=?, health_verified_at=?, finished_at=?, updated_at=? WHERE id=?""",
+            (target_version, target_sha, now, now, now, dep_id)
         )
         column = "installed_services_version" if component == "services" else "installed_admin_version"
         url_column = "services_url" if component == "services" else "admin_url"
-        db.execute(
-            f"UPDATE clients SET {column}=COALESCE(?,{column}),{url_column}=?,last_health_status='healthy',last_health_at=?,updated_at=? WHERE id=?",
-            (target_version, url, now, now, client_id)
-        )
-        db.execute(
-            "UPDATE client_infrastructure SET status='active',domain=?,sync_status='in_sync',last_synced_at=?,updated_at=? WHERE client_id=? AND component=?",
-            (url, now, now, client_id, component)
-        )
+        effective_url = live_found_url or (client.get("services_url") if client else None)
+        if effective_url:
+            db.execute(
+                f"UPDATE clients SET {column}=COALESCE(?,{column}),{url_column}=?,last_health_status='healthy',last_health_at=?,updated_at=? WHERE id=?",
+                (target_version, effective_url, now, now, client_id)
+            )
+            db.execute(
+                "UPDATE client_infrastructure SET status='active',sync_status='in_sync',last_synced_at=?,updated_at=? WHERE client_id=? AND component=?",
+                (now, now, client_id, component)
+            )
+        else:
+            db.execute(
+                f"UPDATE clients SET {column}=COALESCE(?,{column}),last_health_status='healthy',last_health_at=?,updated_at=? WHERE id=?",
+                (target_version, now, now, client_id)
+            )
         db.execute(
             "INSERT INTO deployment_logs(deployment_id,stage,level,message,created_at) VALUES(?,?,?,?,?)",
-            (dep_id, "verified_healthy", "info", f"Verified live health and version {target_version} at {url}. Deployment completed.", now)
+            (dep_id, "verified_healthy", "info", f"Verified live health and version {target_version} at {live_found_url or 'client'}. Deployment automatically marked Completed.", now)
         )
         release_deployment_lock(dep_id)
-        db.audit("deployment_engine", "deployment.succeeded", "deployment", dep_id, client_id, {"url": url, "version": target_version})
+        db.audit("deployment_engine", "deployment.succeeded", "deployment", dep_id, client_id, {"url": live_found_url, "version": target_version})
         return db.one("SELECT d.*,c.name client_name,r.component,r.channel FROM deployments d JOIN clients c ON c.id=d.client_id JOIN releases r ON r.id=d.release_id WHERE d.id=?", (dep_id,)) or row
 
     return deployment
+
 
 @app.get("/api/v1/operator/summary")
 def summary(_: str = Depends(require_operator)):
@@ -755,50 +826,92 @@ def create_deployment(payload: DeploymentCreate, idempotency_key:str|None=Header
     return {"deployment": serialize_row(db.one("SELECT * FROM deployments WHERE id=?", (deployment_id,)))}
 
 
+def resolve_client_webhook_endpoints(client: dict, component: str) -> list[str]:
+    """Collect all unique webhook target endpoints across client configuration and active infrastructure."""
+    target_bases = set()
+    base_url = (client.get("services_url") if component == "services" else client.get("admin_url")) or ""
+    if base_url:
+        target_bases.add(base_url.rstrip("/"))
+
+    infras = db.all(
+        """SELECT domain, config_json, environment_variables_json FROM client_infrastructure
+           WHERE client_id=? AND component=? AND status IN ('active','provisioning')""",
+        (client["id"], component)
+    )
+    for inf in infras:
+        d = (inf.get("domain") or "").strip().rstrip("/")
+        if d:
+            target_bases.add(d if d.startswith("http") else f"https://{d}")
+        try:
+            if inf.get("environment_variables_json"):
+                env_vars = decrypt_environment(inf["environment_variables_json"])
+                web_url = (env_vars.get("VTAB_WEB_URL") or "").strip().rstrip("/")
+                if web_url:
+                    target_bases.add(web_url if web_url.startswith("http") else f"https://{web_url}")
+        except Exception:
+            pass
+        try:
+            if inf.get("config_json"):
+                cfg = json.loads(inf["config_json"]) if isinstance(inf["config_json"], str) else (inf["config_json"] or {})
+                host = (cfg.get("host") or "").strip()
+                if host:
+                    target_bases.add(f"http://{host}:8820" if component == "services" else f"http://{host}:8000")
+        except Exception:
+            pass
+
+    # Ensure both DigitalOcean and Render endpoints are ALWAYS included for VTAB
+    client_name = str((client or {}).get("name") or "").upper()
+    if "VTAB" in client_name:
+        if component == "services":
+            target_bases.add("https://reportservices.vtabsquare.com")
+            target_bases.add("https://vtab-production.onrender.com")
+
+    endpoint_path = "/api/v1/update/webhook" if component == "services" else "/api/update/webhook"
+    urls = [f"{base.rstrip('/')}{endpoint_path}" for base in target_bases if base]
+    if component == "services":
+        local_8820 = f"http://127.0.0.1:8820{endpoint_path}"
+        if local_8820 not in urls:
+            urls.append(local_8820)
+    elif not any("localhost" in u or "127.0.0.1" in u for u in urls):
+        urls.append(f"http://127.0.0.1:8000{endpoint_path}")
+    return urls
+
+
 def dispatch_client_update_webhook(client_id: str, deployment_id: str):
     """Notify client via webhook if services_url or infrastructure domain is registered."""
     try:
         client = db.one("SELECT * FROM clients WHERE id=?", (client_id,))
         deployment = db.one(
-            """SELECT d.*, r.component, r.version release_version, r.release_notes, r.artifact_url
+            """SELECT d.*, r.component, r.version release_version, r.release_notes, r.artifact_url, r.git_commit_sha
                FROM deployments d JOIN releases r ON r.id=d.release_id WHERE d.id=?""",
             (deployment_id,)
         )
         if not client or not deployment:
             return
         component = deployment.get("component") or "services"
-        target_url = (client.get("services_url") if component == "services" else client.get("admin_url")) or ""
-        target_url = target_url.rstrip("/")
-        if not target_url:
-            infra = db.one(
-                """SELECT domain FROM client_infrastructure
-                   WHERE client_id=? AND component=? AND status IN ('active','provisioning')
-                   ORDER BY created_at DESC LIMIT 1""",
-                (client_id, component)
-            )
-            if infra and infra.get("domain"):
-                domain = infra["domain"].strip()
-                target_url = domain if domain.startswith("http") else f"https://{domain}"
-        if not target_url:
+        urls = resolve_client_webhook_endpoints(client, component)
+        if not urls:
             return
 
-        urls = [f"{target_url}/api/v1/update/webhook" if component == "services" else f"{target_url}/api/update/webhook"]
-        if "localhost" not in target_url and "127.0.0.1" not in target_url:
-            local_fallback = "http://127.0.0.1:8830/api/v1/update/webhook" if component == "services" else "http://127.0.0.1:8000/api/update/webhook"
-            urls.append(local_fallback)
-
         def _send():
+            target_v = str(deployment.get("target_version") or "")
+            target_sha = str(deployment.get("git_commit_sha") or "")
+            if not target_sha and target_v.startswith("commit-"):
+                target_sha = target_v.replace("commit-", "", 1)
             payload = {
                 "event": "update_offered",
                 "deployment_id": deployment["id"],
                 "component": deployment["component"],
                 "version": deployment["target_version"],
+                "commit_sha": target_sha,
+                "commitSha": target_sha,
+                "target_commit_sha": target_sha,
                 "release_notes": deployment.get("release_notes") or "",
                 "artifact_url": deployment.get("artifact_url") or "",
                 "timestamp": utc_now(),
             }
             body = json.dumps(payload).encode("utf-8")
-            for wh_url in urls:
+            def _deliver(wh_url: str):
                 try:
                     import urllib.request
                     req = urllib.request.Request(
@@ -807,13 +920,16 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
                         headers={
                             "Content-Type": "application/json",
                             "X-VTAB-Client-ID": client["id"],
+                            "X-VTAB-Agent-Token": "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y",
                         },
                         method="POST",
                     )
-                    with urllib.request.urlopen(req, timeout=40) as resp:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
                         logging.info("Dispatched update webhook to %s (HTTP %s)", wh_url, resp.status)
                 except Exception as exc:
                     logging.info("Client update webhook delivery skipped/offline (%s): %s", wh_url, exc)
+            for wh_url in urls:
+                threading.Thread(target=_deliver, args=(wh_url,), daemon=True).start()
 
         threading.Thread(target=_send, daemon=True).start()
     except Exception as exc:
@@ -828,25 +944,9 @@ def dispatch_client_update_cancellation(client_id: str, deployment_id: str):
         if not client:
             return
         component = (deployment or {}).get("component") or "services"
-        target_url = (client.get("services_url") if component == "services" else client.get("admin_url")) or ""
-        target_url = target_url.rstrip("/")
-        if not target_url:
-            infra = db.one(
-                """SELECT domain FROM client_infrastructure
-                   WHERE client_id=? AND component=? AND status IN ('active','provisioning')
-                   ORDER BY created_at DESC LIMIT 1""",
-                (client_id, component)
-            )
-            if infra and infra.get("domain"):
-                domain = infra["domain"].strip()
-                target_url = domain if domain.startswith("http") else f"https://{domain}"
-        if not target_url:
+        urls = resolve_client_webhook_endpoints(client, component)
+        if not urls:
             return
-
-        urls = [f"{target_url}/api/v1/update/webhook" if component == "services" else f"{target_url}/api/update/webhook"]
-        if "localhost" not in target_url and "127.0.0.1" not in target_url:
-            local_fallback = "http://127.0.0.1:8830/api/v1/update/webhook" if component == "services" else "http://127.0.0.1:8000/api/update/webhook"
-            urls.append(local_fallback)
 
         def _send():
             payload = {
@@ -855,7 +955,7 @@ def dispatch_client_update_cancellation(client_id: str, deployment_id: str):
                 "timestamp": utc_now(),
             }
             body = json.dumps(payload).encode("utf-8")
-            for wh_url in urls:
+            def _deliver_cancel(wh_url: str):
                 try:
                     import urllib.request
                     req = urllib.request.Request(
@@ -864,13 +964,16 @@ def dispatch_client_update_cancellation(client_id: str, deployment_id: str):
                         headers={
                             "Content-Type": "application/json",
                             "X-VTAB-Client-ID": client["id"],
+                            "X-VTAB-Agent-Token": "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y",
                         },
                         method="POST",
                     )
-                    with urllib.request.urlopen(req, timeout=5) as resp:
+                    with urllib.request.urlopen(req, timeout=8) as resp:
                         logging.info("Dispatched update cancellation webhook to %s (HTTP %s)", wh_url, resp.status)
                 except Exception as exc:
                     logging.info("Client update cancellation delivery skipped/offline (%s): %s", wh_url, exc)
+            for wh_url in urls:
+                threading.Thread(target=_deliver_cancel, args=(wh_url,), daemon=True).start()
 
         threading.Thread(target=_send, daemon=True).start()
     except Exception as exc:
