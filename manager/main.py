@@ -545,7 +545,7 @@ def finalize_healthy_deployment_if_ready(deployment: Any) -> Any:
         )
         column = "installed_services_version" if component == "services" else "installed_admin_version"
         url_column = "services_url" if component == "services" else "admin_url"
-        effective_url = live_found_url or (client.get("services_url") if client else None)
+        effective_url = live_found_url or ((client.get("services_url") if component == "services" else client.get("admin_url")) if client else None)
         if effective_url:
             db.execute(
                 f"UPDATE clients SET {column}=COALESCE(?,{column}),{url_column}=?,last_health_status='healthy',last_health_at=?,updated_at=? WHERE id=?",
@@ -865,6 +865,10 @@ def resolve_client_webhook_endpoints(client: dict, component: str) -> list[str]:
         if component == "services":
             target_bases.add("https://reportservices.vtabsquare.com")
             target_bases.add("https://vtab-production.onrender.com")
+        elif component == "administration":
+            target_bases.add("http://admin-reporting.139.59.32.39.nip.io")
+            target_bases.add("http://admin-reporting.vtabsquare.com")
+            target_bases.add("http://127.0.0.1:8835")
 
     endpoint_path = "/api/v1/update/webhook" if component == "services" else "/api/update/webhook"
     urls = [f"{base.rstrip('/')}{endpoint_path}" for base in target_bases if base]
@@ -872,6 +876,10 @@ def resolve_client_webhook_endpoints(client: dict, component: str) -> list[str]:
         local_8820 = f"http://127.0.0.1:8820{endpoint_path}"
         if local_8820 not in urls:
             urls.append(local_8820)
+    elif component == "administration":
+        local_8835 = f"http://127.0.0.1:8835{endpoint_path}"
+        if local_8835 not in urls:
+            urls.append(local_8835)
     elif not any("localhost" in u or "127.0.0.1" in u for u in urls):
         urls.append(f"http://127.0.0.1:8000{endpoint_path}")
     return urls
