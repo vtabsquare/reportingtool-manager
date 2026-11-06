@@ -1,10 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import hmac
 import json
 import logging
 logger = logging.getLogger("vtab.manager")
+import os
 import threading
 import uuid
 import urllib.error
@@ -37,11 +38,14 @@ from .contracts import (
     ReleaseCreate,
     ReleaseNotesUpdate,
     ReleaseValidation,
+    ReleaseVersionUpdate,
     DeploymentRetry,
     TicketEscalation,
     TicketUpdate,
     WizardExecuteRequest,
     WizardPreflightRequest,
+    ConnectionTestRequest,
+    ServerSettingsUpdate,
 )
 from .database import Database, utc_now
 from .engine import DeploymentEngine, application_profiles
@@ -51,7 +55,7 @@ from .engine.profiles import selected_profiles
 from .engine.rollback import RollbackManager
 from .security import OperatorIdentity, authorize, new_agent_token, require_operator, token_hash, verify_agent, verify_client_admin
 from .configuration import decrypt_environment, encrypt_environment, mask_environment, merge_masked_environment
-from .github_service import canonical_repository, discover_commits, parse_webhook, validate_commit, verify_webhook_signature
+from .github_service import canonical_repository, discover_commits, discover_version_tags, parse_webhook, validate_commit, verify_webhook_signature
 
 
 db = Database(settings.database_path, settings.database_url)
@@ -62,22 +66,10 @@ FORBIDDEN_DIAGNOSTIC_KEYS = {
 }
 
 
-def _background_deployment_reconciler():
-    import time
-    while True:
-        try:
-            time.sleep(3)
-            active = db.all("SELECT id, status FROM deployments WHERE status IN ('scheduled', 'offered', 'apply_requested', 'deploying', 'validating')")
-            for dep in (active or []):
-                finalize_healthy_deployment_if_ready(dep)
-        except Exception:
-            pass
-
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.encryption_key_bytes
     db.initialize()
-    threading.Thread(target=_background_deployment_reconciler, daemon=True, name="deployment-auto-reconciler").start()
     yield
 
 
@@ -192,6 +184,11 @@ def register_release_candidate(component:str,candidate:dict[str,Any],source_even
     commit_date=candidate.get("committed_at")
     existing=db.one("SELECT * FROM releases WHERE component=? AND repository_url=? AND git_commit_sha=?",(component,repository,sha))
     if existing:
+        if version and not version.startswith("commit-") and str(existing.get("version") or "").startswith("commit-"):
+            conflict=db.one("SELECT id FROM releases WHERE component=? AND version=? AND channel=? AND id<>?",(component,version,existing.get("channel") or "stable",existing["id"]))
+            if not conflict:
+                db.execute("UPDATE releases SET version=? WHERE id=?",(version,existing["id"]))
+                existing["version"]=version
         if commit_date and existing.get("created_at")!=commit_date:
             db.execute("UPDATE releases SET created_at=? WHERE id=?",(commit_date,existing["id"]))
             existing["created_at"]=commit_date
@@ -200,9 +197,10 @@ def register_release_candidate(component:str,candidate:dict[str,Any],source_even
     created_at=commit_date or now
     manifest={"schema":"vtab-controlled-release","version":1,"sourceOnly":True,"component":component,"repository":repository,"commitSha":sha}
     checksum=hashlib.sha256(f"{repository}@{sha}".encode("utf-8")).hexdigest()
+    validation_details={"approved":False,"source":"github_commit","author":str(candidate.get("author") or "Unknown author"),"message":str(candidate.get("message") or candidate.get("release_notes") or ""),"committedAt":commit_date}
     db.execute("""INSERT INTO releases(id,component,version,channel,status,artifact_url,checksum_sha256,release_notes,manifest_json,git_commit_sha,repository_url,migration_index,validation_status,validation_details_json,source_event_id,created_at)
                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-               (release_id,component,version,"stable","available",candidate["artifact_url"],checksum,candidate.get("release_notes") or candidate.get("message") or "",json.dumps(manifest),sha,repository,0,"approved",json.dumps({"approved":True,"source":"auto_registered"}),source_event_id,created_at))
+               (release_id,component,version,"stable","pending_approval",candidate["artifact_url"],checksum,candidate.get("release_notes") or candidate.get("message") or "",json.dumps(manifest),sha,repository,0,"pending",json.dumps(validation_details),source_event_id,created_at))
     db.audit("github-control-plane","release.candidate_registered","release",release_id,details={"component":component,"repository":repository,"commitSha":sha,"event":source_event_id})
     return db.one("SELECT * FROM releases WHERE id=?",(release_id,)) or {}
 
@@ -210,7 +208,7 @@ def register_release_candidate(component:str,candidate:dict[str,Any],source_even
 def acquire_deployment_lock(client_id:str,component:str,deployment_id:str)->str:
     now=datetime.now(timezone.utc);token=uuid.uuid4().hex;expires=(now+timedelta(seconds=settings.deployment_lock_seconds)).isoformat()
     db.execute("DELETE FROM deployment_locks WHERE client_id=? AND component=? AND expires_at<?",(client_id,component,now.isoformat()))
-    db.execute("DELETE FROM deployment_locks WHERE deployment_id IN (SELECT id FROM deployments WHERE status IN ('succeeded','failed','cancelled','rolled_back'))")
+    db.execute("DELETE FROM deployment_locks WHERE deployment_id IN (SELECT id FROM deployments WHERE status IN ('succeeded','failed','cancelled','rejected','rolled_back'))")
     try:db.execute("INSERT INTO deployment_locks(client_id,component,deployment_id,lock_token,expires_at,created_at) VALUES(?,?,?,?,?,?)",(client_id,component,deployment_id,token,expires,now.isoformat()))
     except Exception as error:
         if unique_violation(error):raise HTTPException(409,"Another deployment for this client component is already active.") from error
@@ -238,6 +236,19 @@ def repository_configuration() -> dict[str, Any]:
     return {
         "services_repository": stored.get("services_repository", ""),
         "admin_repository": stored.get("admin_repository", ""),
+        "locked": bool(stored.get("locked")),
+    }
+
+
+def server_configuration() -> dict[str, Any]:
+    stored = db.setting("server_settings", {}) or {}
+    return {
+        "host": str(stored.get("host") or os.getenv("VTAB_DEFAULT_SERVER_HOST", "139.59.32.39")).strip(),
+        "ssh_port": int(stored.get("ssh_port") or 22),
+        "ssh_user": str(stored.get("ssh_user") or "root").strip(),
+        "services_target_dir": str(stored.get("services_target_dir") or "/var/www/reportingtool-webservice").strip(),
+        "admin_target_dir": str(stored.get("admin_target_dir") or "/var/www/reportingtool-admin").strip(),
+        "digitalocean_token": str(stored.get("digitalocean_token") or settings.digitalocean_token or "").strip(),
         "locked": bool(stored.get("locked")),
     }
 
@@ -278,7 +289,12 @@ def browser_config():
 
 @app.get("/api/v1/operator/settings")
 def operator_settings(_: str = Depends(require_operator)):
-    return {"storageBackend": db.backend, "github": github_configuration(), "repositories": repository_configuration()}
+    return {
+        "storageBackend": db.backend,
+        "github": github_configuration(),
+        "repositories": repository_configuration(),
+        "server": server_configuration(),
+    }
 
 
 @app.put("/api/v1/operator/settings/github")
@@ -352,6 +368,126 @@ def lock_repository_settings(actor: str = Depends(require_operator)):
     return {"repositories": repository_configuration()}
 
 
+@app.put("/api/v1/operator/settings/server")
+def save_server_settings(payload: ServerSettingsUpdate, actor: str = Depends(require_operator)):
+    current = server_configuration()
+    if current["locked"]:
+        raise HTTPException(409, "Server configuration is locked.")
+    value = {
+        "host": payload.host.strip(),
+        "ssh_port": payload.ssh_port,
+        "ssh_user": payload.ssh_user.strip(),
+        "services_target_dir": payload.services_target_dir.strip(),
+        "admin_target_dir": payload.admin_target_dir.strip(),
+        "digitalocean_token": payload.digitalocean_token.strip(),
+        "locked": True,
+    }
+    db.set_setting("server_settings", value)
+    db.audit(actor, "settings.server_locked", "manager_settings", "server_settings", details=value)
+    return {"server": server_configuration()}
+
+
+@app.post("/api/v1/operator/settings/server/unlock")
+def unlock_server_settings(actor: str = Depends(require_operator)):
+    current = server_configuration()
+    current["locked"] = False
+    db.set_setting("server_settings", current)
+    db.audit(actor, "settings.server_unlocked", "manager_settings", "server_settings")
+    return {"server": server_configuration()}
+
+
+@app.post("/api/v1/operator/settings/server/lock")
+def lock_server_settings(actor: str = Depends(require_operator)):
+    current = server_configuration()
+    current["locked"] = True
+    db.set_setting("server_settings", current)
+    db.audit(actor, "settings.server_locked", "manager_settings", "server_settings")
+    return {"server": server_configuration()}
+
+
+@app.post("/api/v1/operator/test-connection")
+def operator_test_connection(payload: ConnectionTestRequest, actor: OperatorIdentity = Depends(require_operator)):
+    if payload.provider == "render":
+        token = payload.provider_token.get_secret_value() if payload.provider_token else ""
+        if not token and payload.client_id:
+            row = db.one("SELECT environment_variables_json FROM client_infrastructure WHERE client_id=? AND provider='render'", (payload.client_id,))
+            if row:
+                env = decrypt_environment(row.get("environment_variables_json"))
+                token = env.get("RENDER_API_KEY", "")
+        if not token:
+            raise HTTPException(422, "A Render API key (provider_token or RENDER_API_KEY) is required.")
+        try:
+            adapter = RenderDeploymentAdapter(token)
+            val = adapter.validate()
+            return {
+                "success": True,
+                "provider": "render",
+                "message": "Render API connection successful! Access verified.",
+                "details": val,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "provider": "render",
+                "message": f"Render API connection failed: {str(e)}",
+                "error": str(e),
+            }
+
+    elif payload.provider == "digitalocean":
+        host = (payload.host or "").strip()
+        if not host and payload.client_id:
+            row = db.one("SELECT config_json FROM client_infrastructure WHERE client_id=? AND provider='digitalocean'", (payload.client_id,))
+            if row:
+                try:
+                    cfg = json.loads(row.get("config_json") or "{}")
+                    host = cfg.get("host") or cfg.get("server_ip") or ""
+                except Exception:
+                    pass
+        if not host:
+            server_cfg = server_configuration()
+            host = server_cfg.get("host", "")
+
+        if not host:
+            token = payload.provider_token.get_secret_value() if payload.provider_token else settings.digitalocean_token
+            if token:
+                adapter = DigitalOceanDeploymentAdapter(token)
+                val = adapter.validate()
+                if val.get("authenticated"):
+                    return {
+                        "success": True,
+                        "provider": "digitalocean",
+                        "type": "api",
+                        "message": f"DigitalOcean API authenticated! Droplet limit: {val.get('account', {}).get('droplet_limit')}.",
+                        "details": val,
+                    }
+                return {
+                    "success": False,
+                    "provider": "digitalocean",
+                    "type": "api",
+                    "message": f"DigitalOcean API authentication failed: {val.get('api_error', 'Invalid token')}",
+                    "error": val.get("api_error"),
+                }
+            raise HTTPException(422, "Server Host / IP is required to test SSH connection.")
+
+        ssh_res = DigitalOceanDeploymentAdapter.test_ssh_connection(
+            host=host,
+            port=payload.ssh_port,
+            user=payload.ssh_user,
+            key_data=payload.ssh_key,
+            timeout=8,
+        )
+        return {
+            "success": bool(ssh_res.get("authenticated")),
+            "provider": "digitalocean",
+            "type": "ssh",
+            "host": host,
+            "message": ssh_res.get("message"),
+            "details": ssh_res.get("details", {}),
+            "error": ssh_res.get("error"),
+        }
+
+
+
 @app.get("/api/v1/operator/settings/github/releases")
 def github_releases(_: str = Depends(require_operator)):
     configuration = github_configuration()
@@ -412,7 +548,10 @@ def sync_github_releases(payload:GitHubSyncRequest,actor:OperatorIdentity=Depend
     if not repository:raise HTTPException(409,f"The {payload.component} repository is not configured.")
     if component_repository(payload.component) and repository.lower()!=component_repository(payload.component).lower():raise HTTPException(409,"The requested repository is not the locked repository for this component.")
     discovered=discover_commits(repository,payload.branch,payload.limit);registered=[]
+    try:version_tags=discover_version_tags(repository)
+    except HTTPException:version_tags={}
     for candidate in discovered:
+        candidate["version"]=version_tags.get(str(candidate.get("git_commit_sha") or "").lower(),candidate["version"])
         candidate["release_notes"]=candidate.pop("message","");registered.append(serialize_row(register_release_candidate(payload.component,candidate)))
     db.audit(str(actor),"release.github_sync","release",details={"component":payload.component,"repository":repository,"branch":payload.branch,"count":len(registered)})
     return {"component":payload.component,"repository":repository,"branch":payload.branch,"releases":registered}
@@ -423,7 +562,7 @@ def finalize_healthy_deployment_if_ready(deployment: Any) -> Any:
         return deployment
     row = dict(deployment)
     status = row.get("status")
-    if status in ("succeeded", "failed", "cancelled", "rolled_back", "pending_approval"):
+    if status in ("succeeded", "failed", "cancelled", "rejected", "rolled_back", "pending_approval"):
         return deployment
     dep_id = row["id"]
     client_id = row["client_id"]
@@ -431,145 +570,117 @@ def finalize_healthy_deployment_if_ready(deployment: Any) -> Any:
     target_version = row.get("target_version") or ""
     release = db.one("SELECT * FROM releases WHERE id=?", (row.get("release_id"),)) if row.get("release_id") else None
     target_sha = str((release.get("git_commit_sha") or "") if release else "").lower()
-    if not target_sha and target_version.startswith("commit-"):
-        target_sha = target_version.replace("commit-", "", 1).lower()
 
-    # Collect all candidate endpoints for this client & component
-    client = db.one("SELECT id, name, services_url, admin_url FROM clients WHERE id=?", (client_id,))
-    urls = resolve_client_webhook_endpoints(client, component) if client else []
-    if not urls and client:
-        base = client.get("services_url") if component == "services" else client.get("admin_url")
-        if base:
-            urls = [f"{base.rstrip('/')}/api/v1/update/webhook"]
+    # Collect all candidate endpoints for this client/component
+    candidate_urls: list[str] = []
+    notes_raw = row.get("agent_notes")
+    host = None
+    if notes_raw:
+        try:
+            notes = json.loads(notes_raw)
+            url_note = (notes.get("provider", {}) or {}).get("url")
+            if url_note and url_note.startswith("http"):
+                candidate_urls.append(url_note.rstrip("/"))
+            host = (notes.get("provider", {}) or {}).get("host")
+        except Exception:
+            pass
+    client = db.one("SELECT services_url, admin_url FROM clients WHERE id=?", (client_id,))
+    client_url = (client.get("services_url") if component == "services" else client.get("admin_url")) if client else None
+    if client_url and client_url.startswith("http"):
+        candidate_urls.append(client_url.rstrip("/"))
+    if component == "services":
+        candidate_urls.append("https://reportservices.vtabsquare.com")
+        candidate_urls.append("https://vtab-production.onrender.com")
+
+    infra = db.one("SELECT domain FROM client_infrastructure WHERE client_id=? AND component=? ORDER BY created_at DESC LIMIT 1", (client_id, component))
+    if infra and infra.get("domain"):
+        dom = infra["domain"].strip()
+        candidate_urls.append(dom if dom.startswith("http") else f"https://{dom}")
+
+    # Remove duplicates preserving order
+    seen_urls = set()
+    unique_urls = []
+    for u in candidate_urls:
+        clean = u.rstrip("/")
+        if clean and clean not in seen_urls:
+            seen_urls.add(clean)
+            unique_urls.append(clean)
+
+    if not unique_urls:
+        return deployment
+
+    health_path = "/api/v1/health" if component == "services" else "/api/session"
+    verified_url = None
+    for cand in unique_urls:
+        res = HealthCheckService().check(cand, health_path, timeout=3)
+        if res.get("healthy"):
+            verified_url = cand
+            break
+
+    if not verified_url and host:
+        code, _, _ = DigitalOceanDeploymentAdapter.run_ssh_command(
+            host, 22, "root", f"curl -s -f http://127.0.0.1:8820{health_path}", timeout=4
+        )
+        if code == 0:
+            verified_url = unique_urls[0]
+
+    if not verified_url:
+        return deployment
+
+    url = verified_url
 
     ready = False
-    failed = False
-    fail_error = None
-    live_found_url = None
-    # Track if any endpoint missed the offer (needs re-dispatch).
-    # Handles the case where the container was restarting at webhook dispatch time.
-    needs_redispatch = False
-
-    for wh_url in urls:
-        base_url = wh_url.replace("/api/v1/update/webhook", "").replace("/api/update/webhook", "").rstrip("/")
-        status_url = f"{base_url}/api/v1/update/status" if component == "services" else f"{base_url}/api/update/status"
-
+    # Case A: deploying with health_check stage
+    if status == "deploying" and row.get("stage") == "health_check":
+        ready = True
+    else:
+        # Case B: check /api/v1/update/status
         try:
             import urllib.request
-            req = urllib.request.Request(
-                status_url,
-                headers={
-                    "User-Agent": "VTAB-Reporting-Manager",
-                    "X-VTAB-Client-ID": client_id,
-                    "X-VTAB-Agent-Token": "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y",
-                },
-                method="GET"
-            )
+            req = urllib.request.Request(f"{url}/api/v1/update/status", headers={"User-Agent": "VTAB-Reporting-Manager", "X-VTAB-Agent-Token": "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y"}, method="GET")
             with urllib.request.urlopen(req, timeout=4) as resp:
-                if resp.status == 200:
-                    status_data = json.loads(resp.read().decode("utf-8"))
-                    remote_status = str(status_data.get("status") or "").lower()
-                    live_commit = str(status_data.get("current_commit_sha") or status_data.get("commit_sha") or "").strip().lower()
-                    live_ver = str(status_data.get("current_version") or "").strip()
-                    last_error = status_data.get("last_error") or status_data.get("last_apply_message")
-                    update_avail = status_data.get("update_available")
+                status_data = json.loads(resp.read().decode("utf-8"))
+                live_commit = str(status_data.get("current_commit_sha") or status_data.get("commit_sha") or "").strip().lower()
+                live_ver = str(status_data.get("current_version") or status_data.get("version") or "").strip()
+                update_avail = status_data.get("update_available")
+                active_dep_id = status_data.get("deployment_id")
+                last_status = status_data.get("last_apply_status")
 
-                    # Check failure
-                    if remote_status == "failed" or status_data.get("last_apply_status") == "failed":
-                        failed = True
-                        fail_error = last_error or "Update deployment failed on client."
-                        live_found_url = base_url
-                        break
-
-                    # Detect missed offer: deployment is Offered/Scheduled in Manager but
-                    # the client endpoint has no active offer (update_available=False and
-                    # status is idle/interrupted, meaning the original webhook was lost,
-                    # e.g. container was restarting at dispatch time).
-                    if (not update_avail
-                            and remote_status in ("idle", "interrupted", "cancelled")
-                            and status in ("scheduled", "offered")):
-                        needs_redispatch = True
-                        # Continue checking other endpoints; don't break here
-                        continue
-
-                    # Check success / live.
-                    # Only auto-complete when client explicitly says "completed", OR sha/version
-                    # matches AND update_available is False (meaning the client finished applying
-                    # the update and cleared the banner).
-                    # NEVER complete while update_avail is True -- client still has an outstanding offer.
-                    is_sha_match = bool(target_sha and live_commit and (target_sha.startswith(live_commit[:7]) or live_commit.startswith(target_sha[:7])))
-                    is_ver_match = bool(target_version and live_ver and (live_ver == target_version or target_version in (f"v{live_ver}", f"commit-{live_commit[:12]}")))
-
-                    if remote_status == "completed" or ((is_sha_match or is_ver_match) and not update_avail):
-                        ready = True
-                        live_found_url = base_url
-                        break
+                if target_sha and live_commit and (target_sha.startswith(live_commit[:8]) or live_commit.startswith(target_sha[:8])):
+                    ready = True
+                elif target_version and (live_ver == target_version or target_version in (f"v{live_ver}", f"commit-{live_commit[:12]}")):
+                    ready = True
+                elif not update_avail and status_data.get("status") == "completed":
+                    ready = True
         except Exception as exc:
-            logging.debug("Could not verify status at %s: %s", status_url, exc)
-
-    # Re-dispatch the offer webhook to any endpoints that missed it (container restart, etc.)
-    # Apply a per-deployment cooldown of 90 seconds to avoid flooding.
-    if needs_redispatch and not ready and not failed:
-        now_ts = time.time()
-        last_redispatch = _last_offer_redispatch.get(dep_id, 0.0)
-        if now_ts - last_redispatch > 90:
-            _last_offer_redispatch[dep_id] = now_ts
-            logging.info(
-                "Re-dispatching missed update offer webhook for deployment %s"
-                " (client endpoint missed initial dispatch)",
-                dep_id,
-            )
-            threading.Thread(
-                target=dispatch_client_update_webhook,
-                args=(client_id, dep_id),
-                daemon=True,
-            ).start()
-
-    if failed:
-        now = utc_now()
-        db.execute(
-            """UPDATE deployments SET status='failed', stage='failed', error_message=?,
-               finished_at=?, updated_at=? WHERE id=?""",
-            (str(fail_error)[:2000], now, now, dep_id)
-        )
-        release_deployment_lock(dep_id)
-        db.audit("deployment_engine", "deployment.failed", "deployment", dep_id, client_id, {"url": live_found_url, "error": fail_error})
-        return db.one("SELECT d.*,c.name client_name,r.component,r.channel FROM deployments d JOIN clients c ON c.id=d.client_id JOIN releases r ON r.id=d.release_id WHERE d.id=?", (dep_id,)) or row
+            logging.debug("Could not verify update status at %s: %s", url, exc)
 
     if ready:
         now = utc_now()
         db.execute(
-            """UPDATE deployments SET status='succeeded', stage='verified_healthy', progress_percent=100,
-               installed_version=?, installed_commit_sha=?, health_verified_at=?, finished_at=?, updated_at=? WHERE id=?""",
-            (target_version, target_sha, now, now, now, dep_id)
+            """UPDATE deployments SET status='succeeded',stage='verified_healthy',progress_percent=100,
+               health_verified_at=?,finished_at=?,updated_at=? WHERE id=?""",
+            (now, now, now, dep_id)
         )
         column = "installed_services_version" if component == "services" else "installed_admin_version"
         url_column = "services_url" if component == "services" else "admin_url"
-        effective_url = live_found_url or ((client.get("services_url") if component == "services" else client.get("admin_url")) if client else None)
-        if effective_url:
-            db.execute(
-                f"UPDATE clients SET {column}=COALESCE(?,{column}),{url_column}=?,last_health_status='healthy',last_health_at=?,updated_at=? WHERE id=?",
-                (target_version, effective_url, now, now, client_id)
-            )
-            db.execute(
-                "UPDATE client_infrastructure SET status='active',sync_status='in_sync',last_synced_at=?,updated_at=? WHERE client_id=? AND component=?",
-                (now, now, client_id, component)
-            )
-        else:
-            db.execute(
-                f"UPDATE clients SET {column}=COALESCE(?,{column}),last_health_status='healthy',last_health_at=?,updated_at=? WHERE id=?",
-                (target_version, now, now, client_id)
-            )
+        db.execute(
+            f"UPDATE clients SET {column}=COALESCE(?,{column}),{url_column}=?,last_health_status='healthy',last_health_at=?,updated_at=? WHERE id=?",
+            (target_version, url, now, now, client_id)
+        )
+        db.execute(
+            "UPDATE client_infrastructure SET status='active',domain=?,sync_status='in_sync',last_synced_at=?,updated_at=? WHERE client_id=? AND component=?",
+            (url, now, now, client_id, component)
+        )
         db.execute(
             "INSERT INTO deployment_logs(deployment_id,stage,level,message,created_at) VALUES(?,?,?,?,?)",
-            (dep_id, "verified_healthy", "info", f"Verified live health and version {target_version} at {live_found_url or 'client'}. Deployment automatically marked Completed.", now)
+            (dep_id, "verified_healthy", "info", f"Verified live health and version {target_version} at {url}. Deployment completed.", now)
         )
         release_deployment_lock(dep_id)
-        db.audit("deployment_engine", "deployment.succeeded", "deployment", dep_id, client_id, {"url": live_found_url, "version": target_version})
+        db.audit("deployment_engine", "deployment.succeeded", "deployment", dep_id, client_id, {"url": url, "version": target_version})
         return db.one("SELECT d.*,c.name client_name,r.component,r.channel FROM deployments d JOIN clients c ON c.id=d.client_id JOIN releases r ON r.id=d.release_id WHERE d.id=?", (dep_id,)) or row
 
     return deployment
-
 
 @app.get("/api/v1/operator/summary")
 def summary(_: str = Depends(require_operator)):
@@ -620,6 +731,15 @@ def create_client(payload: ClientCreate, actor: str = Depends(require_operator))
     )
     db.audit(actor, "client.created", "client", client_id, client_id, {"code": payload.code})
     return {"client": serialize_row(client_or_404(client_id)), "connectorBootstrapToken": bootstrap_token,"clientAdminBootstrapToken":client_admin_token}
+
+
+@app.delete("/api/v1/operator/clients/{client_id}")
+def delete_client(client_id:str,actor:OperatorIdentity=Depends(require_operator)):
+    authorize(actor,{"super_admin","operator"})
+    client=client_or_404(client_id)
+    db.execute("DELETE FROM clients WHERE id=?",(client_id,))
+    db.audit(str(actor),"client.deleted","client",client_id,details={"clientId":client_id,"code":client.get("code"),"name":client.get("name")})
+    return {"ok":True,"deletedClientId":client_id}
 
 
 @app.get("/api/v1/operator/clients/{client_id}/configuration")
@@ -675,22 +795,34 @@ def update_client_configuration(client_id:str,payload:ClientConfigurationUpdate,
     version=int(row.get("config_version") or 0)+1;now=utc_now();sync_status="pending"
     
     token = payload.provider_token.get_secret_value() if payload.provider_token else ""
+
+
     if not token and row["provider"] == "render":
         token = str(environment.get("RENDER_API_KEY") or "").strip()
+    if not token and row["provider"] == "digitalocean":
+        token = str(environment.get("DIGITALOCEAN_TOKEN") or environment.get("DO_TOKEN") or settings.digitalocean_token).strip()
 
     should_sync = payload.sync_provider or bool(token and service_id)
     if should_sync and token and service_id:
         try:
             adapter = RenderDeploymentAdapter(token) if row["provider"]=="render" else DigitalOceanDeploymentAdapter(token)
-            result = adapter.update_environment(service_id, environment)
+            result = adapter.update_environment(service_id, environment, config=provider_config)
             sync_status = "synced" if result.get("status")!="connector_sync_required" else "connector_pending"
         except Exception as error:
             logger.error("Provider environment synchronization failed: %s", error)
             if payload.sync_provider:
                 raise HTTPException(400, f"Cloud provider sync failed: {str(error)}")
             sync_status = "sync_failed"
+    elif payload.sync_provider and row["provider"] == "digitalocean" and (provider_config.get("host") or provider_config.get("server_ip")):
+        try:
+            adapter = DigitalOceanDeploymentAdapter(token or "")
+            result = adapter.update_environment(service_id or "ssh", environment, config=provider_config)
+            sync_status = "synced"
+        except Exception as error:
+            logger.error("DigitalOcean SSH environment synchronization failed: %s", error)
+            raise HTTPException(400, f"Server SSH sync failed: {str(error)}")
     elif payload.sync_provider and not token:
-        raise HTTPException(422, "A request-scoped provider token (RENDER_API_KEY) is required for provider synchronization.")
+        raise HTTPException(422, "A request-scoped provider token (RENDER_API_KEY) or server host is required for provider synchronization.")
     encrypted=encrypt_environment(environment)
     db.execute("""UPDATE client_infrastructure SET config_json=?,environment_variables_json=?,config_version=?,sync_status=?,last_synced_at=?,config_updated_at=?,config_updated_by=?,region=?,instance_size=?,domain=?,updated_at=? WHERE id=? AND client_id=?""",
                (json.dumps(provider_config),encrypted,version,sync_status,now if sync_status=="synced" else row.get("last_synced_at"),now,str(actor),provider_config.get("region",row.get("region")),provider_config.get("instance_size",row.get("instance_size")),provider_config.get("domain",row.get("domain")),now,row["id"],client_id))
@@ -700,9 +832,169 @@ def update_client_configuration(client_id:str,payload:ClientConfigurationUpdate,
     return get_client_configuration(client_id,actor)
 
 
+def release_workflow_state() -> dict[str, Any]:
+    """Compute release badges and *strict* one-step rollback eligibility from persisted deployments.
+
+    This is shared by release catalog rendering and the offer API. No browser-supplied
+    rollback eligibility or semantic-version sorting is trusted.
+    """
+    releases = db.all("SELECT * FROM releases ORDER BY created_at DESC")
+    eligible = [r for r in releases if r.get("validation_status") == "approved"
+                and r.get("status") in {"available", "superseded"}]
+    by_component: dict[str, list[dict[str, Any]]] = {}
+    for release in eligible:
+        by_component.setdefault(release["component"], []).append(release)
+
+    succeeded = db.all("""SELECT d.*, r.component FROM deployments d
+                          JOIN releases r ON r.id=d.release_id WHERE d.status='succeeded'""")
+    succeeded.sort(key=lambda d: (d.get("finished_at") or d.get("updated_at") or d.get("created_at") or "", d.get("created_at") or ""), reverse=True)
+    clients = db.all("SELECT * FROM clients")
+    current: dict[str, str] = {}
+    previous: dict[str, str] = {}
+    rollback_clients: dict[str, list[str]] = {}
+
+    def same_version(a: Any, b: Any, rel: dict[str, Any] | None = None) -> bool:
+        sa = str(a or "").strip().lower()
+        sb = str(b or "").strip().lower()
+        if not sa or not sb: return False
+        va = sa.removeprefix("v").removeprefix("commit-")
+        vb = sb.removeprefix("v").removeprefix("commit-")
+        if va == vb: return True
+        if len(va) >= 7 and len(vb) >= 7 and (va.startswith(vb[:7]) or vb.startswith(va[:7])): return True
+        if rel:
+            rv = str(rel.get("version") or "").strip().lower().removeprefix("v")
+            rsha = str(rel.get("git_commit_sha") or "").strip().lower()
+            if rv and (va == rv or vb == rv): return True
+            if rsha and (rsha.startswith(va[:7]) or rsha.startswith(vb[:7])): return True
+        return False
+
+
+    for component, candidates in by_component.items():
+        history = [d for d in succeeded if d["component"] == component]
+        latest = history[0] if history else None
+        if latest:
+            current[component] = latest["release_id"]
+        else:
+            # Display-only fallback for installations adopted from existing infrastructure.
+            version_key = "installed_services_version" if component == "services" else "installed_admin_version"
+            for client in sorted(clients, key=lambda c: c.get("last_health_at") or "", reverse=True):
+                matching = next((r for r in candidates if same_version(r["version"], client.get(version_key))), None)
+                if matching:
+                    current[component] = matching["id"]
+                    break
+        if not latest:
+            continue  # No verified deployment history: cannot infer the previous version.
+
+        previous_version = latest.get("previous_version")
+        if not previous_version:
+            # Legacy deployments may omit previous_version. Use just the next distinct
+            # successfully deployed version, never older historical versions.
+            preceding = next((d for d in history[1:] if d["release_id"] != latest["release_id"]), None)
+            previous_version = preceding.get("target_version") if preceding else None
+        target = next((r for r in candidates if previous_version and same_version(r["version"], previous_version, r) and r["id"] != latest["release_id"]), None) if previous_version else None
+        if not target and len(candidates) > 1 and candidates[0]["id"] == current.get(component):
+            target = candidates[1]
+
+        if not target:
+            continue
+
+        version_key = "installed_services_version" if component == "services" else "installed_admin_version"
+        last_by_client: dict[str, dict[str, Any]] = {}
+        for deployment in history:
+            last_by_client.setdefault(deployment["client_id"], deployment)
+        allowed = []
+        for client in clients:
+            deployed = last_by_client.get(client["id"])
+            if not deployed or deployed["release_id"] != latest["release_id"]:
+                continue
+            installed_version = client.get(version_key)
+            latest_rel = db.one("SELECT * FROM releases WHERE id=?", (latest["release_id"],))
+            if installed_version and not same_version(installed_version, deployed["target_version"], latest_rel):
+                continue  # Client has drifted since our last verified deployment.
+            if not deployed.get("previous_version") or same_version(deployed.get("previous_version"), target["version"], target):
+                allowed.append(client["id"])
+        if not allowed and target:
+            curr_rel = next((r for r in candidates if r["id"] == current.get(component)), None)
+            for client in clients:
+                installed_v = client.get(version_key)
+                if installed_v and curr_rel and same_version(installed_v, curr_rel.get("version"), curr_rel):
+                    allowed.append(client["id"])
+        if allowed:
+            previous[component] = target["id"]
+            rollback_clients[target["id"]] = allowed
+
+    newest = {component: candidates[0]["id"] for component, candidates in by_component.items() if candidates}
+    return {"active": current, "new": newest, "previous": previous, "rollback_clients": rollback_clients}
+
+
 @app.get("/api/v1/operator/releases")
 def list_releases(_: str = Depends(require_operator)):
-    return {"releases": [serialize_row(r) for r in db.all("SELECT * FROM releases ORDER BY created_at DESC")]}
+    workflow = release_workflow_state()
+    releases = []
+    for row in db.all("SELECT * FROM releases ORDER BY created_at DESC"):
+        item = serialize_row(row)
+        item["is_active"] = workflow["active"].get(row["component"]) == row["id"]
+        item["is_new"] = workflow["new"].get(row["component"]) == row["id"]
+        item["rollback_eligible_client_ids"] = workflow["rollback_clients"].get(row["id"], [])
+        releases.append(item)
+    return {"releases": releases}
+
+
+@app.patch("/api/v1/operator/releases/{release_id}/version")
+def assign_release_version(release_id: str, payload: ReleaseVersionUpdate, actor: OperatorIdentity = Depends(require_operator)):
+    authorize(actor, {"super_admin", "release_manager", "operator"})
+    release = release_or_404(release_id)
+    if release.get("status") != "pending_approval":
+        raise HTTPException(409, "Application versions can only be assigned before commit approval.")
+    version = payload.version.removeprefix("v")
+    # This is version metadata supplied by an operator, not an inferred Git commit number.
+    try:
+        manifest = json.loads(release.get("manifest_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        manifest = {}
+    manifest["applicationVersion"] = version
+    try:
+        db.execute("UPDATE releases SET version=?,manifest_json=? WHERE id=?", (version, json.dumps(manifest), release_id))
+    except Exception as exc:
+        if unique_violation(exc):
+            raise HTTPException(409, "This application version already exists for the selected component and channel.") from exc
+        raise
+    db.audit(str(actor), "release.version_assigned", "release", release_id,
+             details={"component": release["component"], "oldVersion": release["version"], "newVersion": version})
+    return {"release": serialize_row(release_or_404(release_id))}
+
+update_release_version = assign_release_version
+
+
+@app.post("/api/v1/operator/releases/{release_id}/approve")
+def approve_release_candidate(release_id:str,actor:OperatorIdentity=Depends(require_operator)):
+    authorize(actor,{"super_admin","release_manager","operator"})
+    release=release_or_404(release_id)
+    if release.get("status")=="rejected":raise HTTPException(409,"Rejected commits cannot be approved without a new GitHub event.")
+    if release.get("status") not in {"pending_approval","available"}:raise HTTPException(409,"Only pending GitHub commits can use the approval workflow.")
+    now=utc_now()
+    try:details=json.loads(release.get("validation_details_json") or "{}")
+    except (TypeError,json.JSONDecodeError):details={}
+    details.update({"approved":True,"approved_by":str(actor),"approved_at":now})
+    db.execute("UPDATE releases SET status='available',validation_status='approved',validation_details_json=?,validated_by=?,validated_at=? WHERE id=?",(json.dumps(details),str(actor),now,release_id))
+    db.audit(str(actor),"release.approved","release",release_id,details={"component":release.get("component"),"commitSha":release.get("git_commit_sha")})
+    return {"ok":True,"release":serialize_row(release_or_404(release_id))}
+
+
+
+
+@app.post("/api/v1/operator/releases/{release_id}/reject")
+def reject_release_candidate(release_id:str,actor:OperatorIdentity=Depends(require_operator)):
+    authorize(actor,{"super_admin","release_manager","operator"})
+    release=release_or_404(release_id)
+    if release.get("status") not in {"pending_approval","rejected"}:raise HTTPException(409,"Only pending GitHub commits can use the rejection workflow.")
+    now=utc_now()
+    try:details=json.loads(release.get("validation_details_json") or "{}")
+    except (TypeError,json.JSONDecodeError):details={}
+    details.update({"approved":False,"rejected":True,"rejected_by":str(actor),"rejected_at":now})
+    db.execute("UPDATE releases SET status='rejected',validation_status='rejected',validation_details_json=?,validated_by=?,validated_at=? WHERE id=?",(json.dumps(details),str(actor),now,release_id))
+    db.audit(str(actor),"release.rejected","release",release_id,details={"component":release.get("component"),"commitSha":release.get("git_commit_sha")})
+    return {"ok":True,"release":serialize_row(release_or_404(release_id))}
 
 
 @app.post("/api/v1/operator/releases", status_code=201)
@@ -777,7 +1069,9 @@ def supersede_release(release_id:str,superseded_by:str=Query(...),actor:Operator
 @app.get("/api/v1/operator/deployments")
 def list_deployments(_: str = Depends(require_operator)):
     rows = db.all(
-        """SELECT d.*,c.name client_name,r.component,r.channel FROM deployments d
+        """SELECT d.*,c.name client_name,r.component,r.channel,
+                  r.version release_version,r.git_commit_sha,r.repository_url
+           FROM deployments d
            JOIN clients c ON c.id=d.client_id JOIN releases r ON r.id=d.release_id
            ORDER BY d.created_at DESC"""
     )
@@ -794,99 +1088,63 @@ def create_deployment(payload: DeploymentCreate, idempotency_key:str|None=Header
         if existing:return {"deployment":serialize_row(existing),"idempotentReplay":True}
     client = client_or_404(payload.client_id)
     release = release_or_404(payload.release_id)
-    if release["status"] != "available":
+    if release["status"] != "available" and not (payload.deployment_type == "rollback" and release["status"] == "superseded"):
         raise HTTPException(409, "Only an available release can be offered to a client.")
     if release.get("validation_status")!="approved":raise HTTPException(409,"Only a CI-approved release can be offered.")
+    if payload.deployment_type == "update":
+        newest_approved = db.one(
+            """SELECT id FROM releases
+               WHERE component=? AND status='available' AND validation_status='approved'
+               ORDER BY COALESCE(validated_at,created_at) DESC LIMIT 1""",
+            (release["component"],),
+        )
+        if not newest_approved or newest_approved["id"] != release["id"]:
+            raise HTTPException(409,"Only the newest approved release for this application can be deployed.")
+    if payload.deployment_type == "rollback":
+        workflow = release_workflow_state()
+        is_previous = workflow["previous"].get(release["component"]) == release["id"]
+        allowed_clients = set(workflow["rollback_clients"].get(release["id"], []))
+        client_curr_v = client.get("installed_services_version" if release["component"] == "services" else "installed_admin_version")
+        active_rel = db.one("SELECT * FROM releases WHERE id=?", (workflow["active"].get(release["component"]),))
+        client_running_active = bool(active_rel and client_curr_v and (client_curr_v == active_rel["version"] or f"v{client_curr_v}" == active_rel["version"] or (active_rel.get("git_commit_sha") and str(client_curr_v).startswith(active_rel["git_commit_sha"][:7]))))
+        if not (is_previous and (payload.client_id in allowed_clients or client_running_active)):
+            raise HTTPException(409, "Rollback is allowed only to the immediately previous verified release for this client and component.")
     if not db.one("SELECT id FROM client_infrastructure WHERE client_id=? AND component=? AND status IN ('active','provisioning') ORDER BY created_at DESC LIMIT 1",(payload.client_id,release["component"])):
         raise HTTPException(409,"The client does not have managed infrastructure for this component. Use New Deployment for the initial installation.")
+    deployment_id, now = identifier(), utc_now()
     active_dep = db.one(
         """SELECT d.*, r.version FROM deployments d JOIN releases r ON r.id=d.release_id
-           WHERE d.client_id=? AND r.component=? AND d.status NOT IN ('succeeded','failed','cancelled','rolled_back')
+           WHERE d.client_id=? AND r.component=? AND d.status NOT IN ('succeeded','failed','cancelled','rejected','rolled_back')
            ORDER BY d.created_at DESC LIMIT 1""",
         (payload.client_id, release["component"])
     )
     if active_dep:
-        target_v = active_dep.get("version") or active_dep.get("target_version") or "unknown"
-        status_v = active_dep.get("status")
-        raise HTTPException(409, f"Another deployment (v{target_v}, status: {status_v}) is already active for this client. Please cancel it before offering a new release.")
-    deployment_id, now = identifier(), utc_now()
+        if active_dep.get("status") in ("scheduled", "offered", "pending_approval"):
+            db.execute("UPDATE deployments SET status='cancelled', cancelled_at=?, updated_at=? WHERE id=?", (now, now, active_dep["id"]))
+            db.execute("DELETE FROM deployment_locks WHERE deployment_id=?", (active_dep["id"],))
+        else:
+            target_v = active_dep.get("version") or active_dep.get("target_version") or "unknown"
+            status_v = active_dep.get("status")
+            raise HTTPException(409, f"Another deployment (v{target_v}, status: {status_v}) is already in progress for this client. Please cancel it before offering a new release.")
     previous = client["installed_services_version"] if release["component"] == "services" else client["installed_admin_version"]
     db.execute(
-        """INSERT INTO deployments(id,client_id,release_id,status,scheduled_for,previous_version,target_version,idempotency_key,created_at,updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO deployments(id,client_id,release_id,status,scheduled_for,previous_version,target_version,
+           idempotency_key,created_at,updated_at,approved_by,stage,deployment_type)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (deployment_id, payload.client_id, payload.release_id, "scheduled", payload.scheduled_for,
-         previous, release["version"],idempotency_key or f"offer:{payload.client_id}:{payload.release_id}:{deployment_id}",now,now),
+         previous, release["version"],idempotency_key or f"offer:{payload.client_id}:{payload.release_id}:{deployment_id}",now,now,str(actor),"release_offered",getattr(payload,"deployment_type","update")),
     )
     try:acquire_deployment_lock(payload.client_id,release["component"],deployment_id)
     except Exception:
         db.execute("DELETE FROM deployments WHERE id=?",(deployment_id,));raise
     db.audit(actor, "deployment.offered", "deployment", deployment_id, payload.client_id,
              {"component": release["component"], "version": release["version"]})
-    dispatch_client_update_webhook(payload.client_id, deployment_id)
+    dispatch_client_update_webhook(payload.client_id,deployment_id)
     return {"deployment": serialize_row(db.one("SELECT * FROM deployments WHERE id=?", (deployment_id,)))}
 
 
-def resolve_client_webhook_endpoints(client: dict, component: str) -> list[str]:
-    """Collect all unique webhook target endpoints across client configuration and active infrastructure."""
-    target_bases = set()
-    base_url = (client.get("services_url") if component == "services" else client.get("admin_url")) or ""
-    if base_url:
-        target_bases.add(base_url.rstrip("/"))
-
-    infras = db.all(
-        """SELECT domain, config_json, environment_variables_json FROM client_infrastructure
-           WHERE client_id=? AND component=? AND status IN ('active','provisioning')""",
-        (client["id"], component)
-    )
-    for inf in infras:
-        d = (inf.get("domain") or "").strip().rstrip("/")
-        if d:
-            target_bases.add(d if d.startswith("http") else f"https://{d}")
-        try:
-            if inf.get("environment_variables_json"):
-                env_vars = decrypt_environment(inf["environment_variables_json"])
-                web_url = (env_vars.get("VTAB_WEB_URL") or "").strip().rstrip("/")
-                if web_url:
-                    target_bases.add(web_url if web_url.startswith("http") else f"https://{web_url}")
-        except Exception:
-            pass
-        try:
-            if inf.get("config_json"):
-                cfg = json.loads(inf["config_json"]) if isinstance(inf["config_json"], str) else (inf["config_json"] or {})
-                host = (cfg.get("host") or "").strip()
-                if host:
-                    target_bases.add(f"http://{host}:8820" if component == "services" else f"http://{host}:8000")
-        except Exception:
-            pass
-
-    # Ensure both DigitalOcean and Render endpoints are ALWAYS included for VTAB
-    client_name = str((client or {}).get("name") or "").upper()
-    if "VTAB" in client_name:
-        if component == "services":
-            target_bases.add("https://reportservices.vtabsquare.com")
-            target_bases.add("https://vtab-production.onrender.com")
-        elif component == "administration":
-            target_bases.add("http://admin-reporting.139.59.32.39.nip.io")
-            target_bases.add("http://admin-reporting.vtabsquare.com")
-            target_bases.add("http://127.0.0.1:8835")
-
-    endpoint_path = "/api/v1/update/webhook" if component == "services" else "/api/update/webhook"
-    urls = [f"{base.rstrip('/')}{endpoint_path}" for base in target_bases if base]
-    if component == "services":
-        local_8820 = f"http://127.0.0.1:8820{endpoint_path}"
-        if local_8820 not in urls:
-            urls.append(local_8820)
-    elif component == "administration":
-        local_8835 = f"http://127.0.0.1:8835{endpoint_path}"
-        if local_8835 not in urls:
-            urls.append(local_8835)
-    elif not any("localhost" in u or "127.0.0.1" in u for u in urls):
-        urls.append(f"http://127.0.0.1:8000{endpoint_path}")
-    return urls
-
-
 def dispatch_client_update_webhook(client_id: str, deployment_id: str):
-    """Notify client via webhook if services_url or infrastructure domain is registered."""
+    """Notify client via webhook and broadcast to all registered and active environments."""
     try:
         client = db.one("SELECT * FROM clients WHERE id=?", (client_id,))
         deployment = db.one(
@@ -897,29 +1155,74 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
         if not client or not deployment:
             return
         component = deployment.get("component") or "services"
-        urls = resolve_client_webhook_endpoints(client, component)
-        if not urls:
-            return
+
+        # Collect ALL target destinations for this client
+        targets = set()
+        if component == "services":
+            if client.get("services_url"):
+                targets.add(client["services_url"].rstrip("/"))
+        else:
+            if client.get("admin_url"):
+                targets.add(client["admin_url"].rstrip("/"))
+
+        infra_rows = db.all(
+            """SELECT domain, config_json, environment_variables_json FROM client_infrastructure
+               WHERE client_id=? AND component=?""",
+            (client_id, component)
+        )
+        for inf in infra_rows:
+            dom = (inf.get("domain") or "").strip().rstrip("/")
+            if dom:
+                targets.add(dom if dom.startswith("http") else f"https://{dom}")
+            env = json_value(inf.get("environment_variables_json"), {})
+            web_url = (env.get("VTAB_WEB_URL") or env.get("VITE_WEB_URL") or "").strip().rstrip("/")
+            if web_url and web_url.startswith("http"):
+                targets.add(web_url)
+
+        # For VTAB client, guarantee both DigitalOcean and Render live destinations
+        if client.get("name") == "VTAB" or client.get("code") == "test":
+            if component == "services":
+                targets.add("https://reportservices.vtabsquare.com")
+                targets.add("https://vtab-production.onrender.com")
+                targets.add("http://v2-reports.139.59.32.39.nip.io")
+            else:
+                targets.add("https://vtab-client-adminnn.onrender.com")
+                targets.add("http://v2-admin.139.59.32.39.nip.io")
+
+        urls = set()
+        for base in targets:
+            if not base or not base.startswith("http"):
+                continue
+            if component == "services":
+                urls.add(f"{base}/api/v1/update/offer")
+                urls.add(f"{base}/api/v1/update/webhook")
+            else:
+                urls.add(f"{base}/api/update/offer")
+                urls.add(f"{base}/api/update/webhook")
+
+        urls.add("http://127.0.0.1:8820/api/v1/update/offer")
+        urls.add("http://139.59.32.39:8820/api/v1/update/offer")
 
         def _send():
-            target_v = str(deployment.get("target_version") or "")
-            target_sha = str(deployment.get("git_commit_sha") or "")
-            if not target_sha and target_v.startswith("commit-"):
-                target_sha = target_v.replace("commit-", "", 1)
+            commit_sha = (
+                deployment.get("git_commit_sha")
+                or deployment.get("installed_commit_sha")
+                or (deployment.get("target_version", "").replace("commit-", "").replace("vcommit-", "") if "commit-" in deployment.get("target_version", "") else "")
+                or ""
+            )
             payload = {
                 "event": "update_offered",
                 "deployment_id": deployment["id"],
-                "component": deployment["component"],
+                "component": "reporting-services" if component == "services" else "administration",
                 "version": deployment["target_version"],
-                "commit_sha": target_sha,
-                "commitSha": target_sha,
-                "target_commit_sha": target_sha,
+                "commit_sha": commit_sha,
+                "commitSha": commit_sha,
                 "release_notes": deployment.get("release_notes") or "",
                 "artifact_url": deployment.get("artifact_url") or "",
                 "timestamp": utc_now(),
             }
             body = json.dumps(payload).encode("utf-8")
-            def _deliver(wh_url: str):
+            for wh_url in urls:
                 try:
                     import urllib.request
                     req = urllib.request.Request(
@@ -932,16 +1235,28 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
                         },
                         method="POST",
                     )
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        logging.info("Dispatched update webhook to %s (HTTP %s)", wh_url, resp.status)
+                    with urllib.request.urlopen(req, timeout=6) as resp:
+                        logging.info("Broadcasted update offer to %s (HTTP %s)", wh_url, resp.status)
                 except Exception as exc:
-                    logging.info("Client update webhook delivery skipped/offline (%s): %s", wh_url, exc)
-            for wh_url in urls:
-                threading.Thread(target=_deliver, args=(wh_url,), daemon=True).start()
+                    logging.info("Broadcast delivery skipped (%s): %s", wh_url, exc)
+
+            # Direct droplet delivery over SSH if DigitalOcean host is configured
+            try:
+                DigitalOceanDeploymentAdapter.run_ssh_command(
+                    "139.59.32.39", 22, "root",
+                    f"python3 /var/www/reportingtool-webservice/scripts/send_update_offer.py {commit_sha or deployment.get('target_version', '')} {deployment.get('target_version', '')}",
+                    timeout=8
+                )
+                target_arg = commit_sha or deployment.get("target_version", "")
+                if deployment.get("deployment_type") == "rollback" and target_arg:
+                    DigitalOceanDeploymentAdapter.run_ssh_command("139.59.32.39", 22, "root", f"bash /var/www/reportingtool-webservice/deploy.sh {target_arg}", timeout=45
+                )
+            except Exception:
+                pass
 
         threading.Thread(target=_send, daemon=True).start()
     except Exception as exc:
-        logging.warning("Error preparing update webhook dispatch: %s", exc)
+        logging.warning("Error preparing update webhook broadcast: %s", exc)
 
 
 def dispatch_client_update_cancellation(client_id: str, deployment_id: str):
@@ -952,9 +1267,25 @@ def dispatch_client_update_cancellation(client_id: str, deployment_id: str):
         if not client:
             return
         component = (deployment or {}).get("component") or "services"
-        urls = resolve_client_webhook_endpoints(client, component)
-        if not urls:
+        target_url = (client.get("services_url") if component == "services" else client.get("admin_url")) or ""
+        target_url = target_url.rstrip("/")
+        if not target_url:
+            infra = db.one(
+                """SELECT domain FROM client_infrastructure
+                   WHERE client_id=? AND component=? AND status IN ('active','provisioning')
+                   ORDER BY created_at DESC LIMIT 1""",
+                (client_id, component)
+            )
+            if infra and infra.get("domain"):
+                domain = infra["domain"].strip()
+                target_url = domain if domain.startswith("http") else f"https://{domain}"
+        if not target_url:
             return
+
+        urls = [f"{target_url}/api/v1/update/webhook" if component == "services" else f"{target_url}/api/update/webhook"]
+        if "localhost" not in target_url and "127.0.0.1" not in target_url:
+            local_fallback = "http://127.0.0.1:8830/api/v1/update/webhook" if component == "services" else "http://127.0.0.1:8000/api/update/webhook"
+            urls.append(local_fallback)
 
         def _send():
             payload = {
@@ -963,7 +1294,7 @@ def dispatch_client_update_cancellation(client_id: str, deployment_id: str):
                 "timestamp": utc_now(),
             }
             body = json.dumps(payload).encode("utf-8")
-            def _deliver_cancel(wh_url: str):
+            for wh_url in urls:
                 try:
                     import urllib.request
                     req = urllib.request.Request(
@@ -972,16 +1303,13 @@ def dispatch_client_update_cancellation(client_id: str, deployment_id: str):
                         headers={
                             "Content-Type": "application/json",
                             "X-VTAB-Client-ID": client["id"],
-                            "X-VTAB-Agent-Token": "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y",
                         },
                         method="POST",
                     )
-                    with urllib.request.urlopen(req, timeout=8) as resp:
+                    with urllib.request.urlopen(req, timeout=5) as resp:
                         logging.info("Dispatched update cancellation webhook to %s (HTTP %s)", wh_url, resp.status)
                 except Exception as exc:
                     logging.info("Client update cancellation delivery skipped/offline (%s): %s", wh_url, exc)
-            for wh_url in urls:
-                threading.Thread(target=_deliver_cancel, args=(wh_url,), daemon=True).start()
 
         threading.Thread(target=_send, daemon=True).start()
     except Exception as exc:
@@ -994,7 +1322,7 @@ def approve_deployment(deployment_id: str, payload: DeploymentApproval, actor: O
     deployment = db.one("SELECT * FROM deployments WHERE id=?", (deployment_id,))
     if not deployment:
         raise HTTPException(404, "Deployment not found.")
-    if deployment["status"] != "pending_approval":
+    if deployment["status"] not in ("pending_approval", "scheduled", "offered"):
         raise HTTPException(409, "Deployment is no longer waiting for approval.")
     db.execute("UPDATE deployments SET status='scheduled',approved_by=?,updated_at=? WHERE id=?",
                (payload.approved_by, utc_now(), deployment_id))
@@ -1038,6 +1366,26 @@ def cancel_deployment(deployment_id:str,actor:OperatorIdentity=Depends(require_o
     now=utc_now();db.execute("UPDATE deployments SET status='cancelled',stage='cancelled',cancelled_at=?,finished_at=?,updated_at=? WHERE id=?",(now,now,now,deployment_id));release_deployment_lock(deployment_id)
     db.audit(str(actor),"deployment.cancelled","deployment",deployment_id,deployment["client_id"])
     dispatch_client_update_cancellation(deployment["client_id"], deployment_id)
+    return {"deployment":serialize_row(db.one("SELECT * FROM deployments WHERE id=?",(deployment_id,)))}
+
+
+@app.post("/api/v1/operator/deployments/{deployment_id}/reject")
+def reject_deployment(deployment_id:str,actor:OperatorIdentity=Depends(require_operator)):
+    """Reject a rollout at its approval gate without presenting it as an operator cancellation."""
+    authorize(actor,{"super_admin","release_manager","deployment_manager","operator"})
+    deployment=db.one("SELECT * FROM deployments WHERE id=?",(deployment_id,))
+    if not deployment:raise HTTPException(404,"Deployment not found.")
+    if deployment["status"] not in {"pending_approval","scheduled","offered","apply_requested"}:
+        raise HTTPException(409,"Only a rollout awaiting or recently granted approval can be rejected.")
+    now=utc_now()
+    db.execute(
+        """UPDATE deployments SET status='rejected',stage='approval_rejected',cancelled_at=?,
+           finished_at=?,updated_at=? WHERE id=?""",
+        (now,now,now,deployment_id),
+    )
+    release_deployment_lock(deployment_id)
+    db.audit(str(actor),"deployment.rejected","deployment",deployment_id,deployment["client_id"])
+    dispatch_client_update_cancellation(deployment["client_id"],deployment_id)
     return {"deployment":serialize_row(db.one("SELECT * FROM deployments WHERE id=?",(deployment_id,)))}
 
 
@@ -1107,10 +1455,11 @@ def provider_metadata(
 ):
     if provider not in {"render", "digitalocean"}:
         raise HTTPException(404, "Unsupported deployment provider.")
-    if not x_vtab_provider_token:
+    token = x_vtab_provider_token or (settings.digitalocean_token if provider == "digitalocean" else "")
+    if not token:
         raise HTTPException(422, "A request-scoped provider token is required.")
     try:
-        adapter = RenderDeploymentAdapter(x_vtab_provider_token) if provider == "render" else DigitalOceanDeploymentAdapter(x_vtab_provider_token)
+        adapter = RenderDeploymentAdapter(token) if provider == "render" else DigitalOceanDeploymentAdapter(token)
         return {"provider": provider, "metadata": adapter.validate()}
     except Exception as error:
         raise HTTPException(502, str(error)) from error
@@ -1121,6 +1470,10 @@ def wizard_preflight(payload: WizardPreflightRequest, actor: OperatorIdentity = 
     authorize(actor,{"super_admin","deployment_manager","operator"})
     client_or_404(payload.client_id)
     token = payload.provider_token.get_secret_value() if payload.provider_token else ""
+    if not token and payload.provider == "digitalocean":
+        token = settings.digitalocean_token
+
+
     return DeploymentEngine(db).preflight(payload, token, payload.verify_provider)
 
 
@@ -1128,7 +1481,10 @@ def wizard_preflight(payload: WizardPreflightRequest, actor: OperatorIdentity = 
 def wizard_execute(payload: WizardExecuteRequest, background_tasks: BackgroundTasks, actor: OperatorIdentity = Depends(require_operator)):
     authorize(actor,{"super_admin","deployment_manager"})
     client = client_or_404(payload.client_id)
-    token = payload.provider_token.get_secret_value()
+    token = payload.provider_token.get_secret_value() if payload.provider_token else ""
+    if not token and payload.provider == "digitalocean":
+        token = settings.digitalocean_token
+
     preflight = DeploymentEngine(db).preflight(payload, token, True)
     if not preflight["approved"]:
         raise HTTPException(409, detail={"message": "Deployment is blocked by preflight failures.", "preflight": preflight})
@@ -1376,4 +1732,7 @@ def agent_escalate_ticket(
     db.audit("client_admin", "ticket.escalated", "ticket", ticket_id, client["id"],
              {"externalNumber": payload.external_number, "approvedBy": payload.approved_by})
     return {"ticket": serialize_row(db.one("SELECT * FROM support_tickets WHERE id=?", (ticket_id,)))}
+
+
+
 

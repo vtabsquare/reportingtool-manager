@@ -12,5 +12,6 @@ data/
 *.sqlite
 *.sqlite3
 tests/_runtime/
+.pytest_cache/
 .DS_Store
 Thumbs.db

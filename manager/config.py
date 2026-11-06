@@ -35,6 +35,7 @@ class Settings:
     github_repository_services: str = os.getenv("GITHUB_REPOSITORY_SERVICES", "").strip()
     github_repository_admin: str = os.getenv("GITHUB_REPOSITORY_ADMIN", "").strip()
     github_webhook_secret: str = os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()
+    digitalocean_token: str = os.getenv("VTAB_DIGITALOCEAN_TOKEN", os.getenv("DIGITALOCEAN_TOKEN", os.getenv("DO_TOKEN", ""))).strip()
     github_allowed_branches: tuple[str, ...] = tuple(item.strip() for item in os.getenv("VTAB_GITHUB_ALLOWED_BRANCHES", "main").split(",") if item.strip())
     github_required_checks: tuple[str, ...] = tuple(item.strip() for item in os.getenv("VTAB_GITHUB_REQUIRED_CHECKS", "build,test,security").split(",") if item.strip())
     operator_keys_json: str = os.getenv("VTAB_MANAGER_OPERATOR_KEYS_JSON", "").strip()

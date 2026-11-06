@@ -43,8 +43,10 @@ class DeploymentValidator:
             size = str(plan.provider_config.get("instance_size", ""))
             adequate = size not in {"", "s-1vcpu-512mb", "s-1vcpu-1gb", "s-1vcpu-2gb"}
             checks.append(PreflightCheck("capacity", "Server hardware", "Minimum capacity", "passed" if adequate else "failed", size or "No Droplet size selected.", "Use at least 2 vCPU and 4 GB RAM."))
-            ssl = bool(plan.provider_config.get("ssl", True));domain = str(plan.provider_config.get("domain", ""))
-            checks.append(PreflightCheck("domain", "Network & DNS", "Domain for SSL", "passed" if (not ssl or self._domain(domain)) else "failed", domain or "SSL disabled; no domain required.", "Provide a valid FQDN before requesting Let's Encrypt."))
+            ssl = bool(plan.provider_config.get("ssl", True))
+            domain = str(plan.provider_config.get("domain", "")).strip()
+            domain_ok = bool(self._domain(domain)) if (ssl and domain) else True
+            checks.append(PreflightCheck("domain", "Network & DNS", "Domain for SSL", "passed" if domain_ok else "failed", domain or "Direct IP access (no domain / SSL required).", "Provide a valid FQDN before requesting Let's Encrypt." if not domain_ok else ""))
         else:
             owner = plan.provider_config.get("owner_id")
             checks.append(PreflightCheck("workspace", "Cloud provider", "Render workspace", "passed" if owner else "failed", "Workspace selected." if owner else "Render workspace ID is missing.", "Select the Render workspace that owns the service."))

@@ -59,14 +59,28 @@ class DeploymentEngine:
             "The client connector must confirm its local snapshot before an update is activated.",
         ))
         if verify_provider:
+            has_ssh_host = plan.provider == "digitalocean" and bool(plan.provider_config.get("host"))
+            if has_ssh_host:
+                host = str(plan.provider_config.get("host")).strip()
+                port = int(plan.provider_config.get("ssh_port") or 22)
+                user = str(plan.provider_config.get("ssh_user") or "root").strip()
+                ssh_res = DigitalOceanDeploymentAdapter.test_ssh_connection(host, port, user)
+                auth_ok = bool(ssh_res.get("authenticated"))
+                checks.append(PreflightCheck(
+                    "provider_ssh", "Infrastructure target", "Target server SSH connection",
+                    "passed" if auth_ok else "failed",
+                    ssh_res.get("message", ""),
+                    "Ensure target server IP is reachable and SSH credentials are correct." if not auth_ok else ""
+                ))
             if not provider_token:
-                checks.append(PreflightCheck("provider_auth", "Cloud provider", "API authentication", "failed", "No provider token supplied.", "Supply a scoped provider token for this preflight request."))
+                if not has_ssh_host:
+                    checks.append(PreflightCheck("provider_auth", "Cloud provider", "API authentication", "failed", "No provider token supplied.", "Supply a scoped provider token for this preflight request."))
             else:
                 try:
-                    result = self.adapter(plan.provider, provider_token).validate()
+                    result = self.adapter(plan.provider, provider_token).validate(host=plan.provider_config.get("host"))
                     authenticated = bool(result.get("authenticated", True))
                     checks.append(PreflightCheck("provider_auth", "Cloud provider", "API authentication", "passed" if authenticated else "failed", "Provider API token verified." if authenticated else "Provider account is not active.", "Use a token with the required scopes."))
-                    if plan.provider == "digitalocean" and authenticated:
+                    if plan.provider == "digitalocean" and authenticated and not has_ssh_host:
                         region = str(plan.provider_config.get("region", ""))
                         size = str(plan.provider_config.get("instance_size", ""))
                         region_ok = any(item.get("slug") == region and item.get("available", True) for item in result.get("regions", []))
@@ -115,6 +129,20 @@ class DeploymentEngine:
                 for _ in range(60):
                     time.sleep(5)
                     check = health_checker.check(url, profile.health_path, timeout=5)
+                    if not check.get("healthy") and resource.get("deploy_type") == "ssh_direct" and resource.get("host"):
+                        host = resource.get("host")
+                        ssh_user = config.get("ssh_user") or "root"
+                        ssh_port = int(config.get("ssh_port") or 22)
+                        key_data = config.get("ssh_key_data")
+                        port = profile.port
+                        ssh_code, _, _ = DigitalOceanDeploymentAdapter.run_ssh_command(
+                            host, ssh_port, ssh_user,
+                            f"curl -s -f http://127.0.0.1:{port}{profile.health_path}",
+                            key_data=key_data,
+                            timeout=5
+                        )
+                        if ssh_code == 0:
+                            check = {"healthy": True, "status": "ok"}
                     if check.get("healthy"):
                         now = self.now()
                         self.db.execute(

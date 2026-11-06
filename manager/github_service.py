@@ -73,6 +73,7 @@ def discover_commits_from_atom(repository_url: str, branch: str = "main", limit:
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         entries = root.findall("atom:entry", ns)
         canonical = canonical_repository(repository_url)
+        tags_map = discover_tags(repository_url)
         results = []
         for e in entries[:limit]:
             raw_id = (e.find("atom:id", ns).text or "").strip()
@@ -87,10 +88,17 @@ def discover_commits_from_atom(repository_url: str, branch: str = "main", limit:
             updated = (updated_el.text or "").strip() if updated_el is not None else None
             link_el = e.find("atom:link", ns)
             html_url = link_el.attrib.get("href") if link_el is not None else f"{canonical}/commit/{sha}"
+            tag_name = tags_map.get(sha)
+            if not tag_name:
+                for t_sha, t_name in tags_map.items():
+                    if t_sha.startswith(sha[:8]) or sha.startswith(t_sha[:8]):
+                        tag_name = t_name
+                        break
+            ver = tag_name if tag_name else f"commit-{sha[:12]}"
             results.append({
                 "repository_url": canonical,
                 "git_commit_sha": sha,
-                "version": f"commit-{sha[:12]}",
+                "version": ver,
                 "message": title.splitlines()[0][:300],
                 "author": author,
                 "committed_at": updated,
@@ -124,18 +132,94 @@ def discover_commits(repository_url: str, branch: str = "main", limit: int = 10)
     try:
         payload = github_request(f"/repos/{owner}/{repository}/commits?per_page={limit}&sha={urllib.parse.quote(branch, safe='')}")
         canonical = canonical_repository(repository_url)
-        return [{
-            "repository_url": canonical,
-            "git_commit_sha": str(item.get("sha") or "").lower(),
-            "version": f"commit-{str(item.get('sha') or '')[:12]}",
-            "message": str((item.get("commit") or {}).get("message") or "").splitlines()[0][:300],
-            "author": str(((item.get("commit") or {}).get("author") or {}).get("name") or "unknown"),
-            "committed_at": ((item.get("commit") or {}).get("author") or {}).get("date"),
-            "artifact_url": str(item.get("html_url") or f"{canonical}/commit/{item.get('sha')}"),
-        } for item in payload if SHA_PATTERN.fullmatch(str(item.get("sha") or ""))]
+        tags_map = discover_tags(repository_url)
+        results = []
+        for item in payload:
+            sha = str(item.get("sha") or "").lower()
+            if not SHA_PATTERN.fullmatch(sha):
+                continue
+            tag_name = tags_map.get(sha)
+            if not tag_name:
+                for t_sha, t_name in tags_map.items():
+                    if t_sha.startswith(sha[:8]) or sha.startswith(t_sha[:8]):
+                        tag_name = t_name
+                        break
+            ver = tag_name if tag_name else f"commit-{sha[:12]}"
+            results.append({
+                "repository_url": canonical,
+                "git_commit_sha": sha,
+                "version": ver,
+                "message": str((item.get("commit") or {}).get("message") or "").splitlines()[0][:300],
+                "author": str(((item.get("commit") or {}).get("author") or {}).get("name") or "unknown"),
+                "committed_at": ((item.get("commit") or {}).get("author") or {}).get("date"),
+                "artifact_url": str(item.get("html_url") or f"{canonical}/commit/{item.get('sha')}"),
+            })
+        return results
     except Exception as exc:
         logger.info("REST API commit discovery failed or rate-limited (%s). Falling back to Atom feed.", exc)
         return discover_commits_from_atom(repository_url, branch, limit)
+
+
+def discover_tags(repository_url: str) -> dict[str, str]:
+    """Retrieve mapping of commit_sha -> tag_name from git CLI or GitHub REST API."""
+    tag_map: dict[str, str] = {}
+    
+    # 1. Try Git ls-remote (fast, dereferences annotated tags, no rate limits)
+    try:
+        import subprocess
+        proc = subprocess.run(["git", "ls-remote", "--tags", repository_url], capture_output=True, text=True, timeout=8)
+        if proc.returncode == 0:
+            annotated = {}
+            direct = {}
+            for line in proc.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 2:
+                    sha = parts[0].strip().lower()
+                    ref = parts[1].strip()
+                    if ref.startswith("refs/tags/"):
+                        tag_clean = ref.removeprefix("refs/tags/")
+                        if tag_clean.endswith("^{}"):
+                            annotated[sha] = tag_clean.removesuffix("^{}")
+                        else:
+                            direct[sha] = tag_clean
+            tag_map.update(direct)
+            tag_map.update(annotated)
+    except Exception as exc:
+        logger.debug("git ls-remote failed (%s). Trying GitHub REST API.", exc)
+
+    # 2. Try GitHub REST API if git ls-remote did not return tags
+    if not tag_map:
+        try:
+            owner, repository = coordinates(repository_url)
+            payload = github_request(f"/repos/{owner}/{repository}/tags?per_page=100")
+            if isinstance(payload, list):
+                for item in payload:
+                    tag_name = str(item.get("name") or "").strip()
+                    c_sha = str((item.get("commit") or {}).get("sha") or "").lower().strip()
+                    if tag_name and c_sha:
+                        tag_map[c_sha] = tag_name
+        except Exception as exc:
+            logger.debug("GitHub REST API tag discovery skipped: %s", exc)
+
+    return tag_map
+
+def discover_version_tags(repository_url: str, limit: int = 100) -> dict[str, str]:
+    """Map immutable commit SHAs to Git tags for human-readable application versions."""
+    tags = discover_tags(repository_url)
+    if tags:
+        return tags
+    owner, repository = coordinates(repository_url)
+    try:
+        raw_tags = github_request(f"/repos/{owner}/{repository}/tags?per_page={max(1,min(limit,100))}")
+    except Exception:
+        raw_tags = []
+    result: dict[str, str] = {}
+    for tag in raw_tags if isinstance(raw_tags, list) else []:
+        sha = str((tag.get("commit") or {}).get("sha") or "").lower()
+        name = str(tag.get("name") or "").strip()
+        if SHA_PATTERN.fullmatch(sha) and name and sha not in result:
+            result[sha] = name
+    return result
 
 
 def validate_commit(repository_url: str, commit_sha: str) -> dict[str, Any]:
@@ -164,7 +248,8 @@ def parse_webhook(event_name: str, payload: dict[str, Any]) -> dict[str, Any] | 
         if not SHA_PATTERN.fullmatch(sha):
             raise HTTPException(422, "Push event does not contain an exact commit SHA.")
         head = payload.get("head_commit") or {}
-        return {"repository_url": repository, "git_commit_sha": sha, "version": f"commit-{sha[:12]}", "release_notes": str(head.get("message") or "")[:8000], "artifact_url": str(head.get("url") or f"{repository}/commit/{sha}"), "event_action": "push"}
+        author = head.get("author") or head.get("committer") or {}
+        return {"repository_url": repository, "git_commit_sha": sha, "version": f"commit-{sha[:12]}", "release_notes": str(head.get("message") or "")[:8000], "message": str(head.get("message") or "")[:8000], "author": str(author.get("name") or author.get("username") or "Unknown author"), "committed_at": str(head.get("timestamp") or "") or None, "artifact_url": str(head.get("url") or f"{repository}/commit/{sha}"), "event_action": "push"}
     if event_name == "release" and str(payload.get("action") or "") in {"published", "released"}:
         release = payload.get("release") or {}
         tag = str(release.get("tag_name") or "")

@@ -22,7 +22,8 @@ class DeploymentAdapter:
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=25) as response:
-                return json.load(response) if response.length != 0 else {}
+                content = response.read()
+                return json.loads(content.decode("utf-8")) if content else {}
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", "replace")[:1000]
             raise ProviderError(f"{self.provider} API returned {error.code}: {detail}") from error

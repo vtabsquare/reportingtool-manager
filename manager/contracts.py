@@ -29,10 +29,16 @@ class ReleaseCreate(BaseModel):
     migration_index: int = Field(default=0, ge=0)
 
 
+class ReleaseVersionUpdate(BaseModel):
+    # Assigned from an application tag/manifest, never guessed from a Git SHA.
+    version: str = Field(min_length=3, max_length=64, pattern=r"^v?\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.-]+)?$")
+
+
 class DeploymentCreate(BaseModel):
     client_id: str
     release_id: str
     scheduled_for: str | None = None
+    deployment_type: Literal["update", "rollback"] = "update"
 
 
 class DeploymentApproval(BaseModel):
@@ -147,7 +153,7 @@ class WizardPreflightRequest(WizardPlan):
 
 
 class WizardExecuteRequest(WizardPlan):
-    provider_token: SecretStr
+    provider_token: SecretStr | None = None
     confirm_provisioning: bool
 
     @field_validator("confirm_provisioning")
@@ -177,4 +183,25 @@ class RollbackRequest(BaseModel):
         if not value:
             raise ValueError("Explicit rollback confirmation is required.")
         return value
+
+
+class ConnectionTestRequest(BaseModel):
+    provider: Literal["digitalocean", "render"] = "digitalocean"
+    host: str | None = None
+    ssh_port: int = 22
+    ssh_user: str = "root"
+    ssh_key: str | None = None
+    provider_token: SecretStr | None = None
+    client_id: str | None = None
+    infrastructure_id: str | None = None
+
+
+class ServerSettingsUpdate(BaseModel):
+    host: str = Field(default="", max_length=255)
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_user: str = Field(default="root", max_length=64)
+    services_target_dir: str = Field(default="/var/www/reportingtool-webservice", max_length=500)
+    admin_target_dir: str = Field(default="/var/www/reportingtool-admin", max_length=500)
+    digitalocean_token: str = Field(default="", max_length=500)
+
 

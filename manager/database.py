@@ -379,16 +379,10 @@ class Database:
         }
         for table, columns in additions.items():
             for column, definition in columns.items():
-                try:
-                    connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
-                except Exception as exc:
-                    logger.debug("Column migration skipped (%s.%s): %s", table, column, exc)
-        try:
-            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_deployments_idempotency ON deployments(idempotency_key) WHERE idempotency_key IS NOT NULL")
-            connection.execute("CREATE INDEX IF NOT EXISTS idx_releases_commit ON releases(component,repository_url,git_commit_sha)")
-            connection.execute("CREATE INDEX IF NOT EXISTS idx_config_versions ON client_configuration_versions(infrastructure_id,version DESC)")
-        except Exception as exc:
-            logger.debug("Index creation skipped: %s", exc)
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
+        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_deployments_idempotency ON deployments(idempotency_key) WHERE idempotency_key IS NOT NULL")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_releases_commit ON releases(component,repository_url,git_commit_sha)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_config_versions ON client_configuration_versions(infrastructure_id,version DESC)")
         Database._migrate_configuration_rows(connection,True)
 
     @staticmethod

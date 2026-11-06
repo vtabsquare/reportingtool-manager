@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import subprocess
 import sys
@@ -11,6 +12,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+
+REQUIRED_IMPORTS = {
+    "fastapi": "fastapi",
+    "uvicorn": "uvicorn",
+    "dotenv": "python-dotenv",
+    "pydantic": "pydantic",
+    "psycopg": "psycopg[binary]",
+    "cryptography": "cryptography",
+}
+
+
+def missing_dependencies() -> list[str]:
+    missing: list[str] = []
+    for module_name, package_name in REQUIRED_IMPORTS.items():
+        try:
+            importlib.import_module(module_name)
+        except (ImportError, ModuleNotFoundError):
+            missing.append(package_name)
+    return missing
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,17 +44,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    try:
-        import uvicorn
-    except ImportError:
+    missing = missing_dependencies()
+    if missing:
         bootstrap = ROOT / "start_manager.py"
         if bootstrap.exists():
-            print("Required packages are not installed yet.")
-            print("Starting the automatic VTAB Reporting Manager setup...")
-            raise SystemExit(subprocess.call([sys.executable, str(bootstrap), *sys.argv[1:]], cwd=ROOT))
+            print("Missing or incomplete dependencies: " + ", ".join(missing))
+            print("Repairing the VTAB Reporting Manager environment...")
+            raise SystemExit(subprocess.call([sys.executable, str(bootstrap), "--reinstall", *sys.argv[1:]], cwd=ROOT))
         print("Required packages are missing and start_manager.py was not found.")
         print(f'Run: "{sys.executable}" -m pip install -r "{ROOT / "requirements.txt"}"')
         raise SystemExit(1)
+
+    import uvicorn
 
     args = parse_args()
     from manager.config import settings

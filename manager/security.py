@@ -47,15 +47,6 @@ def verify_client_admin(expected_hash:str|None,supplied_token:str|None)->None:
 
 
 def verify_agent(expected_hash: str, supplied_token: str | None) -> None:
-    if not supplied_token:
+    if not supplied_token or not hmac.compare_digest(expected_hash, token_hash(supplied_token)):
         raise HTTPException(status_code=401, detail="Invalid client connector token.")
-    cand_hash = token_hash(supplied_token)
-    known = {
-        expected_hash,
-        token_hash("SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y"),
-        token_hash("vtab_agent_token_live_2026"),
-    }
-    if cand_hash in known:
-        return
-    raise HTTPException(status_code=401, detail="Invalid client connector token.")
 

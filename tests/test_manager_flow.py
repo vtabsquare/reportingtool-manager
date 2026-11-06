@@ -73,13 +73,8 @@ class ManagerFlowTests(unittest.TestCase):
             DeploymentCreate(client_id=client_id, release_id=release_id),
             actor=OperatorIdentity("test_operator","operator"),
         )
-        deployment_id = deployment["deployment"]["id"]
-        approval = main.approve_deployment(
-            deployment_id,
-            DeploymentApproval(approved_by="client-admin@example.com"),
-            actor=OperatorIdentity("test_operator","operator"),
-        )
-        self.assertEqual(approval["deployment"]["status"], "scheduled")
+        self.assertEqual(deployment["deployment"]["status"], "scheduled")
+        self.assertEqual(deployment["deployment"]["approved_by"], "test_operator")
         pending = main.agent_next_deployment(x_vtab_client_id=client_id, x_vtab_agent_token=token)
         self.assertIsNone(pending["deployment"])
 
@@ -135,6 +130,49 @@ class ManagerFlowTests(unittest.TestCase):
         self.assertEqual(html.count('data-wizard-step="'), 7)
         self.assertNotIn("${icon(", html)
 
+    def test_only_newest_approved_release_can_be_deployed(self):
+        client = main.create_client(
+            ClientCreate(name="Release Gate Client", code="release-gate-client"), actor="test_operator"
+        )["client"]
+        now = main.utc_now()
+        main.db.execute(
+            "INSERT INTO client_infrastructure(id,client_id,provider,component,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            ("release-gate-infra",client["id"],"render","services","active",now,now),
+        )
+
+        release_ids = []
+        for version, sha in (("7.0.0","2"*40),("7.1.0","3"*40)):
+            release = main.create_release(
+                ReleaseCreate(
+                    component="services",version=version,channel="stable",
+                    artifact_url=f"https://example.com/releases/services-{version}.zip",
+                    checksum_sha256=("a" if version=="7.0.0" else "b")*64,repository_url="https://github.com/vtab/reporting-services",
+                    git_commit_sha=sha,
+                ),
+                actor="test_operator",
+            )["release"]
+            main.validate_release(
+                release["id"],ReleaseValidation(approved=True,ci_status="success",checks={"build":"success","test":"success","security":"success"}),
+                actor=OperatorIdentity("release-owner","release_manager"),
+            )
+            main.publish_release(release["id"],actor="test_operator")
+            release_ids.append(release["id"])
+
+        with self.assertRaises(HTTPException) as stale:
+            main.create_deployment(
+                DeploymentCreate(client_id=client["id"],release_id=release_ids[0]),
+                actor=OperatorIdentity("test_operator","operator"),
+            )
+        self.assertEqual(stale.exception.status_code,409)
+        self.assertIn("newest approved release",stale.exception.detail)
+
+        newest = main.create_deployment(
+            DeploymentCreate(client_id=client["id"],release_id=release_ids[1]),
+            actor=OperatorIdentity("test_operator","operator"),
+        )["deployment"]
+        self.assertEqual(newest["status"],"scheduled")
+        self.assertEqual(newest["stage"],"release_offered")
+
     def test_centralized_preflight_checks_releases_repositories_and_secrets(self):
         client = main.create_client(
             ClientCreate(name="Preflight Client", code="preflight-client", contact_email="ops@example.com"),
@@ -174,6 +212,68 @@ class ManagerFlowTests(unittest.TestCase):
         tables = {row["name"] for row in main.db.all("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertIn("client_infrastructure", tables)
         self.assertIn("deployment_logs", tables)
+
+    def test_github_candidates_require_explicit_approval_or_rejection(self):
+        candidate = {
+            "repository_url": "https://github.com/vtab/reporting-services",
+            "git_commit_sha": "a" * 40,
+            "version": "commit-aaaaaaaaaaaa",
+            "artifact_url": "https://github.com/vtab/reporting-services/commit/" + "a" * 40,
+            "message": "Improve deployment health checks",
+            "author": "Release Engineer",
+            "committed_at": "2026-11-06T09:30:00+00:00",
+        }
+        pending = main.register_release_candidate("services", candidate, "delivery-1")
+        self.assertEqual(pending["status"], "pending_approval")
+        self.assertEqual(pending["validation_status"], "pending")
+        approved = main.approve_release_candidate(
+            pending["id"], actor=OperatorIdentity("release-owner", "release_manager")
+        )["release"]
+        self.assertEqual(approved["status"], "available")
+        self.assertEqual(approved["validation_status"], "approved")
+
+        rejected_candidate = dict(candidate, git_commit_sha="b" * 40, version="commit-bbbbbbbbbbbb")
+        rejected = main.register_release_candidate("services", rejected_candidate, "delivery-2")
+        result = main.reject_release_candidate(
+            rejected["id"], actor=OperatorIdentity("release-owner", "release_manager")
+        )["release"]
+        self.assertEqual(result["status"], "rejected")
+
+    def test_client_delete_and_manager_update_frontend_contracts(self):
+        client = main.create_client(
+            ClientCreate(name="Disposable Client", code="disposable-client"), actor="test_operator"
+        )["client"]
+        result = main.delete_client(
+            client["id"], actor=OperatorIdentity("manager-owner", "super_admin")
+        )
+        self.assertTrue(result["ok"])
+        self.assertIsNone(main.db.one("SELECT id FROM clients WHERE id=?", (client["id"],)))
+
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "manager" / "static" / "app.js").read_text(encoding="utf-8")
+        html = (root / "manager" / "static" / "index.html").read_text(encoding="utf-8")
+        for marker in (
+            "data-approve-release", "data-reject-release", "Export CSV", "data-delete-client",
+            "data-client-view", "offerSelectAllBtn", "Roll back", "release-tag live",
+            "Application version", "Deploy release", "data-toggle-deployment-history",
+            "Only the newest approved release can be deployed", "Read-only rollout",
+        ):
+            self.assertIn(marker, script + html)
+        self.assertNotIn("offerClientSelect", html)
+        self.assertNotIn("data-complete-deployment", script)
+        self.assertNotIn("data-approve=", script)
+        self.assertNotIn("data-reject-deployment=", script)
+        self.assertNotIn("workflow-banner\"><", script)
+        self.assertNotIn("Offer update", script)
+        self.assertNotIn("Supersede</button>", script)
+        self.assertNotIn("dop_v1_", html)
+        self.assertNotIn("xkeysib-", html)
+
+        launcher = (root / "run_manager.py").read_text(encoding="utf-8")
+        bootstrap = (root / "start_manager.py").read_text(encoding="utf-8")
+        self.assertIn('"cryptography": "cryptography"', launcher)
+        self.assertIn('"--reinstall"', launcher)
+        self.assertIn("dependencies_healthy", bootstrap)
 
 
 if __name__ == "__main__":
