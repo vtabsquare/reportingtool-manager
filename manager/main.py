@@ -694,7 +694,7 @@ def summary(_: str = Depends(require_operator)):
     for key, query in queries.items():
         counts[key] = (db.one(query) or {"total": 0})["total"]
     recent = [finalize_healthy_deployment_if_ready(r) for r in db.all(
-        "SELECT d.*,c.name client_name,r.component FROM deployments d JOIN clients c ON c.id=d.client_id JOIN releases r ON r.id=d.release_id ORDER BY d.created_at DESC LIMIT 8"
+        "SELECT d.*,c.name client_name,r.component,r.git_commit_sha,r.repository_url FROM deployments d JOIN clients c ON c.id=d.client_id JOIN releases r ON r.id=d.release_id ORDER BY d.created_at DESC LIMIT 8"
     )]
     counts["recent_deployments"] = [serialize_row(r) for r in recent]
     counts["recent_tickets"] = [serialize_row(r) for r in db.all(

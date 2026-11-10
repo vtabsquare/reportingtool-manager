@@ -128,14 +128,13 @@ class DeploymentEngine:
                 health_checker = HealthCheckService()
                 for _ in range(60):
                     time.sleep(5)
-                    check = health_checker.check(url, profile.health_path, timeout=5)
-                    if not check.get("healthy") and resource.get("deploy_type") == "ssh_direct" and resource.get("host"):
+                    if resource.get("deploy_type") == "ssh_direct" and resource.get("host"):
                         host = resource.get("host")
-                        ssh_user = config.get("ssh_user") or "root"
-                        ssh_port = int(config.get("ssh_port") or 22)
-                        key_data = config.get("ssh_key_data")
+                        ssh_user = provider_config.get("ssh_user") or "root"
+                        ssh_port = int(provider_config.get("ssh_port") or 22)
+                        key_data = provider_config.get("ssh_key_data")
                         port = profile.port
-                        ssh_code, _, _ = DigitalOceanDeploymentAdapter.run_ssh_command(
+                        ssh_code, ssh_out, _ = DigitalOceanDeploymentAdapter.run_ssh_command(
                             host, ssh_port, ssh_user,
                             f"curl -s -f http://127.0.0.1:{port}{profile.health_path}",
                             key_data=key_data,
@@ -143,6 +142,10 @@ class DeploymentEngine:
                         )
                         if ssh_code == 0:
                             check = {"healthy": True, "status": "ok"}
+                        else:
+                            check = {"healthy": False, "status": "unhealthy"}
+                    else:
+                        check = health_checker.check(url, profile.health_path, timeout=5)
                     if check.get("healthy"):
                         now = self.now()
                         self.db.execute(

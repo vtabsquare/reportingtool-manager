@@ -139,13 +139,17 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
         return None
 
     def provision(self, profile: ApplicationProfile, config: dict[str, Any], repository: str, environment: dict[str, str]) -> dict[str, Any]:
-        host = str(config.get("host") or config.get("server_ip") or config.get("droplet_ip") or "").strip()
+        strip_chars = '`"\' \t\r\n'
+        raw_host = str(config.get("host") or config.get("server_ip") or config.get("droplet_ip") or "")
+        host = raw_host.strip(strip_chars).replace("`", "")
         if host:
-            port = int(config.get("ssh_port") or 22)
-            user = str(config.get("ssh_user") or "root").strip()
+            port = int(str(config.get("ssh_port") or 22).strip(strip_chars))
+            user = str(config.get("ssh_user") or "root").strip(strip_chars).replace("`", "")
             key_data = config.get("ssh_key")
-            target_dir = str(config.get("target_dir") or (f"/var/www/{profile.key}" if profile.key == "services" else f"/var/www/{profile.key}")).strip()
-            domain = str(config.get("domain") or "").strip()
+            default_dir = "/var/www/reportingtool-webservice" if profile.key == "services" else "/var/www/reportingtool-admin"
+            raw_target_dir = str(config.get("target_dir") or "").strip(strip_chars).replace("`", "")
+            target_dir = raw_target_dir if raw_target_dir else default_dir
+            domain = str(config.get("domain") or "").strip(strip_chars).replace("`", "")
             ssl = bool(config.get("ssl", False))
             url = (f"https://{domain}" if ssl else f"http://{domain}") if domain else f"http://{host}:{profile.port}"
 
@@ -155,25 +159,54 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
 
             self.run_ssh_command(host, port, user, f"mkdir -p '{target_dir}'", key_data=key_data)
 
-            # Atomic environment configuration
-            env_file = f"{target_dir}/web.env" if profile.key == "services" else f"{target_dir}/backend/.env"
-            env_lines = [f"{k}={v}" for k, v in sorted(environment.items())]
+            # Git clone or init/fetch if not present, then checkout approved commit
+            commit_sha = str(config.get("approved_commit_sha") or "").strip(strip_chars).replace("`", "")
+            if repository:
+                clone_cmd = (
+                    f"if [ ! -d '{target_dir}/.git' ]; then "
+                    f"mkdir -p '{target_dir}' && cd '{target_dir}' && git init && "
+                    f"(git remote add origin '{repository}' 2>/dev/null || git remote set-url origin '{repository}') && "
+                    f"git fetch origin 2>&1; "
+                    f"fi"
+                )
+                self.run_ssh_command(host, port, user, clone_cmd, key_data=key_data, timeout=60)
+            if commit_sha:
+                git_cmd = f"cd '{target_dir}' && if [ -d .git ]; then git fetch origin 2>&1 && git reset --hard {commit_sha} 2>&1; fi"
+                self.run_ssh_command(host, port, user, git_cmd, key_data=key_data, timeout=30)
+
+            # Atomic environment configuration (strip any accidental markdown backticks or quotes)
+            backend_dir = f"{target_dir}/backend" if profile.key == "administration" else target_dir
+            self.run_ssh_command(host, port, user, f"mkdir -p '{backend_dir}'", key_data=key_data)
+            env_file = f"{target_dir}/web.env" if profile.key == "services" else f"{backend_dir}/.env"
+            env_lines = [f"{k.strip(strip_chars)}={str(v).strip(strip_chars).replace('`', '')}" for k, v in sorted(environment.items())]
             env_content = "\n".join(env_lines) + "\n"
             b64_env = base64.b64encode(env_content.encode("utf-8")).decode("ascii")
             write_cmd = f"echo '{b64_env}' | base64 -d > '{env_file}' && chmod 600 '{env_file}'"
             self.run_ssh_command(host, port, user, write_cmd, key_data=key_data)
 
-            # Git commit update if applicable
-            commit_sha = str(config.get("approved_commit_sha") or "").strip()
-            if commit_sha and len(commit_sha) == 40:
-                git_cmd = f"cd '{target_dir}' && if [ -d .git ]; then git fetch origin 2>&1 && git reset --hard {commit_sha} 2>&1; fi"
-                self.run_ssh_command(host, port, user, git_cmd, key_data=key_data)
-
-            # Restart target container or service
-            container = str(config.get("container_name") or f"vtab-{profile.key}-api").strip()
-            service = str(config.get("service_name") or f"reportingtool-{profile.key}").strip()
-            restart_cmd = f"docker restart {container} 2>/dev/null || systemctl restart {service} 2>/dev/null || systemctl restart {service}.service 2>/dev/null || true"
-            self.run_ssh_command(host, port, user, restart_cmd, key_data=key_data)
+            # Target service lifecycle and Nginx routing
+            if profile.key == "services":
+                container = "vtab-reporting-api"
+                # Ensure Nginx site is enabled for reportingtool
+                nginx_cmd = "if [ -f /etc/nginx/sites-available/reportingtool ]; then ln -sf /etc/nginx/sites-available/reportingtool /etc/nginx/sites-enabled/reportingtool; nginx -t && systemctl reload nginx; fi"
+                self.run_ssh_command(host, port, user, nginx_cmd, key_data=key_data)
+                # Re-launch container with fresh environment and mount
+                restart_cmd = (
+                    f"docker rm -f {container} 2>/dev/null || true; "
+                    f"docker run -d --name {container} --restart always -p {profile.port}:{profile.port} "
+                    f"--env-file '{env_file}' -v '{target_dir}/api:/app' vtab-reporting-api:latest"
+                )
+                code, out, err = self.run_ssh_command(host, port, user, restart_cmd, key_data=key_data, timeout=30)
+                if code != 0:
+                    raise RuntimeError(f"Failed to launch container {container}: {err or out}")
+            else:
+                # Administration tool
+                nginx_cmd = "if [ -f /etc/nginx/sites-available/reportingtool-admin ]; then ln -sf /etc/nginx/sites-available/reportingtool-admin /etc/nginx/sites-enabled/reportingtool-admin; nginx -t && systemctl reload nginx; fi"
+                self.run_ssh_command(host, port, user, nginx_cmd, key_data=key_data)
+                restart_cmd = "systemctl daemon-reload && (systemctl restart reportingtool-admin || systemctl restart vtab-admin)"
+                code, out, err = self.run_ssh_command(host, port, user, restart_cmd, key_data=key_data, timeout=30)
+                if code != 0:
+                    raise RuntimeError(f"Failed to restart admin service: {err or out}")
 
             return {
                 "resource_id": f"droplet-{host}",

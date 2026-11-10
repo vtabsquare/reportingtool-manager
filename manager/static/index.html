@@ -8,7 +8,7 @@
   <script>
     (()=>{const saved=localStorage.getItem('vtab_manager_theme');document.documentElement.dataset.theme=saved||'dark'})()
   </script>
-  <link rel="stylesheet" href="/assets/styles.css?v=0.6.9">
+  <link rel="stylesheet" href="/assets/styles.css?v=0.7.1">
 </head>
 <body>
   <svg class="svg-library" aria-hidden="true">
@@ -102,6 +102,6 @@
   <dialog id="tokenDialog" class="token-dialog"><form method="dialog"><div class="dialog-head"><div class="dialog-title-icon"><svg><use href="#i-key"/></svg></div><div class="dialog-title"><small>CONNECTOR REGISTRATION</small><h2>Save these bootstrap credentials</h2><p>These secrets appear once and belong in the client environment's vault.</p></div></div><pre id="bootstrapToken"></pre><div class="dialog-actions"><button class="primary" value="default">I saved the credentials</button></div></form></dialog>
 
   <dialog id="offerDialog" class="offer-dialog"><form method="dialog" id="offerForm"><div class="dialog-head"><div class="dialog-title-icon"><svg><use href="#i-rocket"/></svg></div><div class="dialog-title"><small>RELEASE ROLLOUT</small><h2 id="offerDialogTitle">Offer release update</h2><p id="offerDialogHelp">Select one or more clients for controlled rollout approval.</p></div><button class="close" type="button" data-close-dialog>&times;</button></div><input type="hidden" name="release_id" id="offerReleaseId"><div class="offer-toolbar"><input id="offerClientSearch" type="search" placeholder="Search clients…" aria-label="Search clients"><button id="offerSelectAllBtn" class="secondary" type="button">Select all</button><button id="offerDeselectAllBtn" class="secondary" type="button">Clear selection</button></div><div id="offerClientList" class="offer-client-list"></div><div class="offer-summary"><b>Release:</b> <span id="offerVersionText">-</span><b>Commit:</b> <span id="offerCommitText">-</span><strong id="offerSelectionCount">0 clients selected</strong></div><div class="dialog-actions"><button class="secondary" type="button" data-close-dialog>Cancel</button><button class="primary" id="offerSubmitButton" type="submit"><svg><use href="#i-send"/></svg> Deploy to selected clients</button></div></form></dialog>
-  <script src="/assets/app.js?v=0.6.0"></script>
+  <script src="/assets/app.js?v=0.6.2"></script>
 </body>
 </html>

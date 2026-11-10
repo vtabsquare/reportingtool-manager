@@ -117,12 +117,19 @@ function renderDeployments(){
   return `${viewTitle('Deployment operations','Review incoming commits, deploy releases to clients, and verify connector health',actions)}${renderGitHubReleaseSource()}${panel('Incoming commits','This is the only approval gate. Approved commits move automatically into Releases.',pendingReleaseTable(pending),'pending-releases')}${draftTable}${deploymentHistoryPanel()}`;
 }
 function deploymentTargetUrl(row){
+  if(!row) return '';
   const notes=(()=>{try{return JSON.parse(row.agent_notes||'{}')}catch(e){return {}}})();
-  if(notes.provider?.url) return notes.provider.url;
-  const client=(state.clients||[]).find(c=>c.id===row.client_id);
-  if(row.component==='services') return client?.services_url || 'https://reportservices.vtabsquare.com';
-  if(row.component==='administration') return client?.admin_url || '';
-  return '';
+  let url = (notes.provider?.url || '').trim();
+  if(!url){
+    const client=(state.clients||[]).find(c=>c.id===row.client_id);
+    if(row.component==='services') url = client?.services_url || 'https://reportservices.vtabsquare.com';
+    else if(row.component==='administration') url = client?.admin_url || 'https://admin-reporting.vtabsquare.com';
+  }
+  if(url){
+    url = url.replace(/[`'"]/g, '').trim();
+    if(url && !/^https?:\/\//i.test(url)) url = 'https://' + url;
+  }
+  return url;
 }
 function deploymentVersion(row){
   if(!row) return '';
@@ -134,8 +141,18 @@ function deploymentVersion(row){
 }
 function deploymentTable(rows,compact){
   if(!rows.length)return empty('No deployment jobs yet.',`<button class="text-action" data-open-deployment>Create the first deployment</button>`);
-  return `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Application</th><th>Application version</th><th>Commit</th><th>Status</th>${compact?'':'<th>Created</th>'}</tr></thead><tbody>${rows.map(row=>{
-    return `<tr><td><div class="client-name"><span class="client-logo">${esc((row.client_name||'C')[0])}</span><strong>${esc(row.client_name)}</strong></div></td><td><div class="component-cell">${icon('code-branch')}<strong>${esc(componentLabel(row.component))}</strong></div></td><td><span class="version-chip">${esc(versionLabel(deploymentVersion(row)))}</span>${row.deployment_type==='rollback'?'<span class="release-tag rollback-label">ROLLBACK</span>':''}</td><td><a class="commit-link" href="${esc(row.repository_url||'#')}" target="_blank" rel="noopener noreferrer">${esc((row.git_commit_sha||'').slice(0,8)||'—')}</a></td><td>${badge(row.status)}</td>${compact?'':`<td>${stamp(row.created_at)}</td>`}</tr>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Application</th><th>Application version</th><th>Commit</th><th>Status</th><th>Live App</th>${compact?'':'<th>Created</th>'}</tr></thead><tbody>${rows.map(row=>{
+    const targetUrl = deploymentTargetUrl(row);
+    const isCompleted = ['succeeded', 'completed'].includes(row.status);
+    const liveLink = (isCompleted && targetUrl)
+      ? `<a class="live-app-badge" href="${esc(targetUrl)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(targetUrl)} in a new tab">${icon('external-link')}<span>Open ↗</span></a>`
+      : `<span style="color:var(--text-dim,#64748b);font-size:12px">—</span>`;
+    const rel = (state.releases||[]).find(r=>r.id===row.release_id);
+    const commitSha = row.git_commit_sha || rel?.git_commit_sha || ((row.target_version||'').startsWith('commit-') ? row.target_version.slice(7) : '');
+    const repoUrl = row.repository_url || rel?.repository_url || (row.component === 'services' ? (state.settings.repositories?.services_repository || 'https://github.com/vtabsquare/Reportingtool-webservice') : (state.settings.repositories?.admin_repository || 'https://github.com/vtabsquare/Reporting-admin'));
+    const cleanRepo = String(repoUrl||'').replace(/\.git$/,'');
+    const commitLink = commitSha ? `<a class="commit-link" href="${esc(cleanRepo)}/commit/${esc(commitSha)}" target="_blank" rel="noopener noreferrer">${esc(commitSha.slice(0,8))}</a>` : `<span style="color:var(--text-dim,#64748b);font-size:12px">—</span>`;
+    return `<tr><td><div class="client-name"><span class="client-logo">${esc((row.client_name||'C')[0])}</span><strong>${esc(row.client_name)}</strong></div></td><td><div class="component-cell">${icon('code-branch')}<strong>${esc(componentLabel(row.component))}</strong></div></td><td><span class="version-chip">${esc(versionLabel(deploymentVersion(row)))}</span>${row.deployment_type==='rollback'?'<span class="release-tag rollback-label">ROLLBACK</span>':''}</td><td>${commitLink}</td><td>${badge(row.status)}</td><td>${liveLink}</td>${compact?'':`<td>${stamp(row.created_at)}</td>`}</tr>`;
   }).join('')}</tbody></table></div>`;
 }
 function renderReleases(){
@@ -545,7 +562,9 @@ async function ensureWizardClient(){
 }
 function wizardPlan(){
   const data=formData($('deploymentForm'));const repositories=state.settings.repositories||{};const application=data.application||'services';
-  const environment_variables={};['SUPABASE_URL','VITE_SUPABASE_ANON_KEY','SUPABASE_SERVICE_ROLE_KEY','VTAB_WEB_URL','BREVO_API_KEY','ADMIN_EMAIL','VTAB_SMTP_FROM','ADMIN_OTP_ENABLED'].forEach(key=>{const value=data[`env_${key}`];if(value)environment_variables[key]=value});
+  const environment_variables={};['SUPABASE_URL','VITE_SUPABASE_ANON_KEY','SUPABASE_SERVICE_ROLE_KEY','VTAB_WEB_URL','BREVO_API_KEY','ADMIN_EMAIL','VTAB_SMTP_FROM','ADMIN_OTP_ENABLED'].forEach(key=>{
+    const value=data[`env_${key}`];if(value)environment_variables[key]=typeof value==='string'?value.replace(/^[`'"\s]+|[`'"\s]+$/g,''):value;
+  });
   if(environment_variables.SUPABASE_URL)environment_variables.VITE_SUPABASE_URL=environment_variables.SUPABASE_URL;
   const clientId=state.wizardClientId||data.client_id;
   if(clientId)environment_variables.VTAB_CLIENT_ID=clientId;
@@ -555,7 +574,13 @@ function wizardPlan(){
   }
   environment_variables.VTAB_SIMULATE_BUILD='0';
   const release_ids={};if(application!=='administration'&&data.services_release)release_ids.services=data.services_release;if(application!=='services'&&data.administration_release)release_ids.administration=data.administration_release;
-  return {client_id:clientId,application,provider:data.provider||'render',release_ids,repositories:{services:repositories.services_repository||'',administration:repositories.admin_repository||''},provider_config:{service_name:data.service_name,region:data.region,instance_size:data.instance_size,owner_id:data.owner_id,service_id:data.service_id||'',branch:data.branch||'main',image:data.image||'ubuntu-24-04-x64',domain:data.domain||'',ssl:Boolean(data.domain&&data.domain.trim()),host:data.host||state.settings?.server?.host||'',ssh_user:data.ssh_user||state.settings?.server?.ssh_user||'root',ssh_port:Number(data.ssh_port||state.settings?.server?.ssh_port||22),target_dir:data.target_dir||''},environment_variables};
+  const cleanVal=v=>typeof v==='string'?v.replace(/^[`'"\s]+|[`'"\s]+$/g,''):v;
+  const targetDir=cleanVal(data.target_dir)||(application==='administration'?'/var/www/reportingtool-admin':'/var/www/reportingtool-webservice');
+  const domain=cleanVal(data.domain)||(application==='administration'?'admin-reporting.vtabsquare.com':'reportservices.vtabsquare.com');
+  const host=cleanVal(data.host)||state.settings?.server?.host||'139.59.32.39';
+  const sshUser=cleanVal(data.ssh_user)||state.settings?.server?.ssh_user||'root';
+  const sshPort=Number(cleanVal(data.ssh_port)||state.settings?.server?.ssh_port||22);
+  return {client_id:clientId,application,provider:data.provider||'digitalocean',release_ids,repositories:{services:repositories.services_repository||'',administration:repositories.admin_repository||''},provider_config:{service_name:cleanVal(data.service_name)||(application==='administration'?'reportingtool-admin':'vtab-reporting-v2'),region:data.region||'blr1',instance_size:data.instance_size||'s-2vcpu-4gb',owner_id:data.owner_id||'',service_id:data.service_id||'',branch:data.branch||'main',image:data.image||'ubuntu-24-04-x64',domain:domain,ssl:Boolean(domain&&domain.trim()),host:host,ssh_user:sshUser,ssh_port:sshPort,target_dir:targetDir},environment_variables};
 }
 function renderPreflight(result){
   const checks=result.checks||[];const passed=checks.filter(check=>check.status==='passed').length;const score=checks.length?Math.round(passed/checks.length*100):0;
@@ -573,7 +598,7 @@ async function wizardContinue(){
 async function publishRelease(id){try{await api(`/api/v1/operator/releases/${id}/publish`,{method:'POST'});notify('Release published and ready for deployment.');await loadAll()}catch(error){notify(error.message,true)}}
 async function approveDeployment(id){const approved_by=prompt('Client administrator who approved this deployment:');if(!approved_by)return;try{await api(`/api/v1/operator/deployments/${id}/approve`,{method:'POST',body:JSON.stringify({approved_by})});notify('Deployment approved and available to the connector.');await loadAll()}catch(error){notify(error.message,true)}}
 async function updateTicket(id,status){try{await api(`/api/v1/operator/tickets/${id}`,{method:'PATCH',body:JSON.stringify({status})});notify('Ticket status updated.');await loadAll()}catch(error){notify(error.message,true)}}
-function formData(form){return Object.fromEntries([...new FormData(form).entries()].filter(([,value])=>value!==''))}
+function formData(form){return Object.fromEntries([...new FormData(form).entries()].map(([k,v])=>[k,typeof v==='string'?v.replace(/^[`'"\s]+|[`'"\s]+$/g,''):v]).filter(([,value])=>value!==''))}
 function wireForm(id,handler){
   const form=$(id);
   if(!form)return;
