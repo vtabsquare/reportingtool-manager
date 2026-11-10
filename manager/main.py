@@ -1210,19 +1210,24 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
                 targets.add("https://vtab-client-adminnn.onrender.com")
                 targets.add("http://v2-admin.139.59.32.39.nip.io")
 
-        urls = set()
+        # Build ordered target destinations - prioritize live production endpoints first
+        urls = []
+        if component == "services":
+            urls.append("https://reportservices.vtabsquare.com/api/v1/update/offer")
+            urls.append("http://127.0.0.1:8820/api/v1/update/offer")
+        else:
+            urls.append("https://admin-reporting.vtabsquare.com/api/update/offer")
+            urls.append("https://vtab-client-adminnn.onrender.com/api/update/offer")
+
         for base in targets:
             if not base or not base.startswith("http"):
                 continue
-            if component == "services":
-                urls.add(f"{base}/api/v1/update/offer")
-                urls.add(f"{base}/api/v1/update/webhook")
-            else:
-                urls.add(f"{base}/api/update/offer")
-                urls.add(f"{base}/api/update/webhook")
-
-        urls.add("http://127.0.0.1:8820/api/v1/update/offer")
-        urls.add("http://139.59.32.39:8820/api/v1/update/offer")
+            cand = f"{base}/api/v1/update/offer" if component == "services" else f"{base}/api/update/offer"
+            if cand not in urls:
+                urls.append(cand)
+            hook = f"{base}/api/v1/update/webhook" if component == "services" else f"{base}/api/update/webhook"
+            if hook not in urls:
+                urls.append(hook)
 
         def _send():
             commit_sha = (
@@ -1256,10 +1261,10 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
                         },
                         method="POST",
                     )
-                    with urllib.request.urlopen(req, timeout=6) as resp:
-                        logging.info("Broadcasted update offer to %s (HTTP %s)", wh_url, resp.status)
+                    with urllib.request.urlopen(req, timeout=3) as resp:
+                        logger.info("Broadcasted update offer to %s (HTTP %s)", wh_url, resp.status)
                 except Exception as exc:
-                    logging.info("Broadcast delivery skipped (%s): %s", wh_url, exc)
+                    logger.debug("Broadcast delivery skipped (%s): %s", wh_url, exc)
 
             # Direct droplet delivery over SSH if DigitalOcean host is configured
             try:
