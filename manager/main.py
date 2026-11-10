@@ -1528,7 +1528,11 @@ def wizard_execute(payload: WizardExecuteRequest, background_tasks: BackgroundTa
         payload.environment_variables["ADMIN_EMAIL"] = "harishkadhi18022001@gmail.com"
     for profile in selected_profiles(payload.application):
         release_id = payload.release_ids.get(profile.key)
-        release = db.one("SELECT * FROM releases WHERE id=? AND component=? AND status='available' AND validation_status='approved'", (release_id, profile.key)) if release_id else None
+        release = None
+        if release_id:
+            release = db.one("SELECT * FROM releases WHERE id=? AND component=? AND status='available' AND validation_status='approved'", (release_id, profile.key))
+        if not release:
+            release = db.one("SELECT * FROM releases WHERE component=? AND status='available' AND validation_status='approved' ORDER BY created_at DESC LIMIT 1", (profile.key,))
         if not release:
             raise HTTPException(409, f"A published {profile.name} release is required.")
         repository = repositories.get(profile.key)

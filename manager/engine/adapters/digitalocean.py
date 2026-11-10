@@ -139,17 +139,17 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
         return None
 
     def provision(self, profile: ApplicationProfile, config: dict[str, Any], repository: str, environment: dict[str, str]) -> dict[str, Any]:
-        strip_chars = '`"\' \t\r\n'
+        strip_chars = '`"\'* \t\r\n'
         raw_host = str(config.get("host") or config.get("server_ip") or config.get("droplet_ip") or "")
-        host = raw_host.strip(strip_chars).replace("`", "")
+        host = raw_host.strip(strip_chars).replace("`", "").replace("*", "")
         if host:
-            port = int(str(config.get("ssh_port") or 22).strip(strip_chars))
-            user = str(config.get("ssh_user") or "root").strip(strip_chars).replace("`", "")
+            port = int(str(config.get("ssh_port") or 22).strip(strip_chars).replace("*", ""))
+            user = str(config.get("ssh_user") or "root").strip(strip_chars).replace("`", "").replace("*", "")
             key_data = config.get("ssh_key")
             default_dir = "/var/www/reportingtool-webservice" if profile.key == "services" else "/var/www/reportingtool-admin"
-            raw_target_dir = str(config.get("target_dir") or "").strip(strip_chars).replace("`", "")
+            raw_target_dir = str(config.get("target_dir") or "").strip(strip_chars).replace("`", "").replace("*", "")
             target_dir = raw_target_dir if raw_target_dir else default_dir
-            domain = str(config.get("domain") or "").strip(strip_chars).replace("`", "")
+            domain = str(config.get("domain") or "").strip(strip_chars).replace("`", "").replace("*", "")
             ssl = bool(config.get("ssl", False))
             url = (f"https://{domain}" if ssl else f"http://{domain}") if domain else f"http://{host}:{profile.port}"
 
@@ -174,11 +174,16 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                 git_cmd = f"cd '{target_dir}' && if [ -d .git ]; then git fetch origin 2>&1 && git reset --hard {commit_sha} 2>&1; fi"
                 self.run_ssh_command(host, port, user, git_cmd, key_data=key_data, timeout=30)
 
+            # Rebuild frontend web distribution if source package exists
+            if profile.key == "services":
+                build_cmd = f"if [ -f '{target_dir}/package.json' ]; then cd '{target_dir}' && npm run build:web 2>&1 && chown -R www-data:www-data '{target_dir}/dist-web' 2>/dev/null || true; fi"
+                self.run_ssh_command(host, port, user, build_cmd, key_data=key_data, timeout=120)
+
             # Atomic environment configuration (strip any accidental markdown backticks or quotes)
             backend_dir = f"{target_dir}/backend" if profile.key == "administration" else target_dir
             self.run_ssh_command(host, port, user, f"mkdir -p '{backend_dir}'", key_data=key_data)
             env_file = f"{target_dir}/web.env" if profile.key == "services" else f"{backend_dir}/.env"
-            env_lines = [f"{k.strip(strip_chars)}={str(v).strip(strip_chars).replace('`', '')}" for k, v in sorted(environment.items())]
+            env_lines = [f"{k.strip(strip_chars).replace('*', '')}={str(v).strip(strip_chars).replace('`', '').replace('*', '')}" for k, v in sorted(environment.items())]
             env_content = "\n".join(env_lines) + "\n"
             b64_env = base64.b64encode(env_content.encode("utf-8")).decode("ascii")
             write_cmd = f"echo '{b64_env}' | base64 -d > '{env_file}' && chmod 600 '{env_file}'"

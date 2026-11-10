@@ -29,7 +29,11 @@ class DeploymentEngine:
         checks = self.validator.validate_static(plan)
         for profile in selected_profiles(plan.application):
             release_id = plan.release_ids.get(profile.key)
-            release = self.db.one("SELECT * FROM releases WHERE id=? AND component=? AND status='available' AND validation_status='approved'", (release_id, profile.key)) if release_id else None
+            release = None
+            if release_id:
+                release = self.db.one("SELECT * FROM releases WHERE id=? AND component=? AND status='available' AND validation_status='approved'", (release_id, profile.key))
+            if not release:
+                release = self.db.one("SELECT * FROM releases WHERE component=? AND status='available' AND validation_status='approved' ORDER BY created_at DESC LIMIT 1", (profile.key,))
             checksum_ok = bool(release and len(str(release.get("checksum_sha256", ""))) == 64 and len(str(release.get("git_commit_sha", "")))==40 and release.get("repository_url"))
             checks.append(PreflightCheck(
                 f"release_{profile.key}", "Artifact", f"{profile.name} release integrity",
