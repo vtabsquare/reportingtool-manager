@@ -579,7 +579,15 @@ function wizardPlan(){
     const m=state.wizardBootstrapToken.match(/vtab_tok_[a-f0-9]+/);
     if(m)environment_variables.VTAB_AGENT_TOKEN=m[0];
   }
-  environment_variables.VTAB_SIMULATE_BUILD='0';
+  environment_variables.VTAB_AGENT_TOKEN = environment_variables.VTAB_AGENT_TOKEN || 'SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y';
+  environment_variables.VTAB_MANAGER_URL = environment_variables.VTAB_MANAGER_URL || 'https://manager.139.59.32.39.nip.io';
+  environment_variables.VTAB_AUTO_OFFER_GITHUB = 'false';
+  environment_variables.VTAB_SIMULATE_BUILD = '0';
+  environment_variables.ADMIN_OTP_ENABLED = environment_variables.ADMIN_OTP_ENABLED || '1';
+  environment_variables.ADMIN_EMAIL = environment_variables.ADMIN_EMAIL || 'harishkadhi18022001@gmail.com';
+  environment_variables.VTAB_SMTP_FROM = environment_variables.VTAB_SMTP_FROM || 'aivtabsquare@gmail.com';
+  environment_variables.SUPABASE_URL = environment_variables.SUPABASE_URL || 'https://asjscibujiikthxmpxgg.supabase.co';
+  environment_variables.VITE_SUPABASE_URL = environment_variables.SUPABASE_URL;
   const release_ids={};if(application!=='administration'&&data.services_release)release_ids.services=data.services_release;if(application!=='services'&&data.administration_release)release_ids.administration=data.administration_release;
   const cleanVal=v=>typeof v==='string'?v.replace(/^[`'"\s]+|[`'"\s]+$/g,''):v;
   const targetDir=cleanVal(data.target_dir)||(application==='administration'?'/var/www/reportingtool-admin':'/var/www/reportingtool-webservice');

@@ -1499,6 +1499,28 @@ def wizard_preflight(payload: WizardPreflightRequest, actor: OperatorIdentity = 
     if not token and payload.provider == "digitalocean":
         token = settings.digitalocean_token
 
+    # Pre-populate stored client secrets if missing from current wizard inputs
+    infra_rows = db.all("SELECT environment_variables_json FROM client_infrastructure WHERE client_id=? ORDER BY created_at DESC", (payload.client_id,))
+    for inf in infra_rows:
+        saved_env = decrypt_environment(inf.get("environment_variables_json"))
+        for k, v in saved_env.items():
+            if k not in payload.environment_variables and v:
+                payload.environment_variables[k] = v
+
+    payload.environment_variables.setdefault("VTAB_CLIENT_ID", payload.client_id)
+    payload.environment_variables.setdefault("VTAB_AGENT_TOKEN", "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y")
+    payload.environment_variables.setdefault("VTAB_MANAGER_URL", "https://manager.139.59.32.39.nip.io")
+    payload.environment_variables.setdefault("VTAB_AUTO_OFFER_GITHUB", "false")
+    payload.environment_variables.setdefault("VTAB_SIMULATE_BUILD", "0")
+    payload.environment_variables.setdefault("ADMIN_OTP_ENABLED", "1")
+    payload.environment_variables.setdefault("ADMIN_EMAIL", "harishkadhi18022001@gmail.com")
+    payload.environment_variables.setdefault("VTAB_SMTP_FROM", "aivtabsquare@gmail.com")
+    payload.environment_variables.setdefault("SUPABASE_URL", "https://asjscibujiikthxmpxgg.supabase.co")
+    payload.environment_variables.setdefault("VITE_SUPABASE_URL", payload.environment_variables["SUPABASE_URL"])
+    domain = str(payload.provider_config.get("domain") or "").strip()
+    ssl = bool(payload.provider_config.get("ssl", False))
+    resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
+    payload.environment_variables.setdefault("VTAB_WEB_URL", resolved_web_url)
 
     return DeploymentEngine(db).preflight(payload, token, payload.verify_provider)
 
@@ -1511,21 +1533,34 @@ def wizard_execute(payload: WizardExecuteRequest, background_tasks: BackgroundTa
     if not token and payload.provider == "digitalocean":
         token = settings.digitalocean_token
 
+    # Pre-populate stored client secrets if missing from current wizard inputs
+    infra_rows = db.all("SELECT environment_variables_json FROM client_infrastructure WHERE client_id=? ORDER BY created_at DESC", (client["id"],))
+    for inf in infra_rows:
+        saved_env = decrypt_environment(inf.get("environment_variables_json"))
+        for k, v in saved_env.items():
+            if k not in payload.environment_variables and v:
+                payload.environment_variables[k] = v
+
+    payload.environment_variables.setdefault("VTAB_CLIENT_ID", client["id"])
+    payload.environment_variables.setdefault("VTAB_AGENT_TOKEN", "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y")
+    payload.environment_variables.setdefault("VTAB_MANAGER_URL", "https://manager.139.59.32.39.nip.io")
+    payload.environment_variables.setdefault("VTAB_AUTO_OFFER_GITHUB", "false")
+    payload.environment_variables.setdefault("VTAB_SIMULATE_BUILD", "0")
+    payload.environment_variables.setdefault("ADMIN_OTP_ENABLED", "1")
+    payload.environment_variables.setdefault("ADMIN_EMAIL", "harishkadhi18022001@gmail.com")
+    payload.environment_variables.setdefault("VTAB_SMTP_FROM", "aivtabsquare@gmail.com")
+    payload.environment_variables.setdefault("SUPABASE_URL", "https://asjscibujiikthxmpxgg.supabase.co")
+    payload.environment_variables.setdefault("VITE_SUPABASE_URL", payload.environment_variables["SUPABASE_URL"])
+    domain = str(payload.provider_config.get("domain") or "").strip()
+    ssl = bool(payload.provider_config.get("ssl", False))
+    resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
+    payload.environment_variables.setdefault("VTAB_WEB_URL", resolved_web_url)
+
     preflight = DeploymentEngine(db).preflight(payload, token, True)
     if not preflight["approved"]:
         raise HTTPException(409, detail={"message": "Deployment is blocked by preflight failures.", "preflight": preflight})
     jobs = []
     repositories = payload.repositories
-    if "VTAB_CLIENT_ID" not in payload.environment_variables:
-        payload.environment_variables["VTAB_CLIENT_ID"] = client["id"]
-    if "VTAB_SIMULATE_BUILD" not in payload.environment_variables:
-        payload.environment_variables["VTAB_SIMULATE_BUILD"] = "0"
-    if "VTAB_SMTP_FROM" not in payload.environment_variables:
-        payload.environment_variables["VTAB_SMTP_FROM"] = "aivtabsquare@gmail.com"
-    if "ADMIN_OTP_ENABLED" not in payload.environment_variables:
-        payload.environment_variables["ADMIN_OTP_ENABLED"] = "1"
-    if "ADMIN_EMAIL" not in payload.environment_variables:
-        payload.environment_variables["ADMIN_EMAIL"] = "harishkadhi18022001@gmail.com"
     for profile in selected_profiles(payload.application):
         release_id = payload.release_ids.get(profile.key)
         release = None

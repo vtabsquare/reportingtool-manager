@@ -183,6 +183,39 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
             backend_dir = f"{target_dir}/backend" if profile.key == "administration" else target_dir
             self.run_ssh_command(host, port, user, f"mkdir -p '{backend_dir}'", key_data=key_data)
             env_file = f"{target_dir}/web.env" if profile.key == "services" else f"{backend_dir}/.env"
+
+            # Preserve existing server configuration keys if not explicitly provided
+            check_env_code, check_env_out, _ = self.run_ssh_command(host, port, user, f"cat '{env_file}' 2>/dev/null || true", key_data=key_data, timeout=10)
+            if check_env_code == 0 and check_env_out:
+                for line in check_env_out.splitlines():
+                    line = line.strip()
+                    if line and "=" in line and not line.startswith("#"):
+                        ek, _, ev = line.partition("=")
+                        ek = ek.strip().strip(strip_chars).replace("*", "")
+                        ev = ev.strip().strip(strip_chars).replace("`", "").replace("*", "")
+                        if ek and ek not in environment:
+                            environment[ek] = ev
+
+            if profile.key == "services":
+                environment.setdefault("VTAB_AGENT_TOKEN", "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y")
+                environment.setdefault("VTAB_MANAGER_URL", "https://manager.139.59.32.39.nip.io")
+                environment.setdefault("VTAB_AUTO_OFFER_GITHUB", "false")
+                environment.setdefault("VTAB_SIMULATE_BUILD", "0")
+                environment.setdefault("ADMIN_OTP_ENABLED", "1")
+                environment.setdefault("ADMIN_EMAIL", "harishkadhi18022001@gmail.com")
+                environment.setdefault("VTAB_SMTP_FROM", "aivtabsquare@gmail.com")
+                environment.setdefault("SUPABASE_URL", "https://asjscibujiikthxmpxgg.supabase.co")
+                environment.setdefault("VITE_SUPABASE_URL", environment["SUPABASE_URL"])
+                resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
+                environment.setdefault("VTAB_WEB_URL", resolved_web_url)
+                if commit_sha:
+                    environment["VTAB_RELEASE_COMMIT_SHA"] = commit_sha[:8]
+                rel_ver = str(config.get("version") or config.get("target_version") or "").replace("commit-", "")
+                if rel_ver:
+                    environment["VTAB_RELEASE_VERSION"] = rel_ver
+                else:
+                    environment.setdefault("VTAB_RELEASE_VERSION", "6.1.12")
+
             env_lines = [f"{k.strip(strip_chars).replace('*', '')}={str(v).strip(strip_chars).replace('`', '').replace('*', '')}" for k, v in sorted(environment.items())]
             env_content = "\n".join(env_lines) + "\n"
             b64_env = base64.b64encode(env_content.encode("utf-8")).decode("ascii")
@@ -192,9 +225,48 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
             # Target service lifecycle and Nginx routing
             if profile.key == "services":
                 container = "vtab-reporting-api"
+                agent_token = environment.get("VTAB_AGENT_TOKEN", "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y")
+
+                # Ensure deploy.sh and dist-web permissions
+                setup_perms_cmd = (
+                    f"chmod +x '{target_dir}/deploy.sh' 2>/dev/null || true; "
+                    f"chown -R www-data:www-data '{target_dir}/dist-web' 2>/dev/null || true; "
+                    f"chmod -R 755 '{target_dir}/dist-web' 2>/dev/null || true"
+                )
+                self.run_ssh_command(host, port, user, setup_perms_cmd, key_data=key_data)
+
+                # Ensure systemd host deploy trigger service (port 8829) is active with current agent token
+                trigger_content = (
+                    f"[Unit]\n"
+                    f"Description=VTAB Services Host Deploy Trigger\n"
+                    f"After=network.target docker.service\n\n"
+                    f"[Service]\n"
+                    f"Type=simple\n"
+                    f"User=root\n"
+                    f"WorkingDirectory={target_dir}\n"
+                    f"Environment=VTAB_AGENT_TOKEN={agent_token}\n"
+                    f"ExecStart=/usr/bin/python3 {target_dir}/scripts/deploy_trigger_service.py\n"
+                    f"Restart=always\n"
+                    f"RestartSec=3\n\n"
+                    f"[Install]\n"
+                    f"WantedBy=multi-user.target\n"
+                )
+                b64_trigger = base64.b64encode(trigger_content.encode("utf-8")).decode("ascii")
+                trigger_cmd = (
+                    f"echo '{b64_trigger}' | base64 -d > /etc/systemd/system/vtab-deploy-trigger.service && "
+                    f"systemctl daemon-reload && systemctl enable --now vtab-deploy-trigger.service && "
+                    f"systemctl restart vtab-deploy-trigger.service 2>/dev/null || true"
+                )
+                self.run_ssh_command(host, port, user, trigger_cmd, key_data=key_data)
+
                 # Ensure Nginx site is enabled for reportingtool
                 nginx_cmd = "if [ -f /etc/nginx/sites-available/reportingtool ]; then ln -sf /etc/nginx/sites-available/reportingtool /etc/nginx/sites-enabled/reportingtool; nginx -t && systemctl reload nginx; fi"
                 self.run_ssh_command(host, port, user, nginx_cmd, key_data=key_data)
+
+                # Ensure Docker image exists; build if missing
+                build_image_cmd = f"if [ ! $(docker images -q vtab-reporting-api:latest 2>/dev/null) ]; then cd '{target_dir}/api' && docker build -t vtab-reporting-api:latest . 2>&1; fi"
+                self.run_ssh_command(host, port, user, build_image_cmd, key_data=key_data, timeout=180)
+
                 # Re-launch container with fresh environment and mount
                 restart_cmd = (
                     f"docker rm -f {container} 2>/dev/null || true; "
@@ -324,7 +396,8 @@ write_files:
           client_body_buffer_size 16M;
 
           location = /index.html {{
-              add_header Cache-Control "no-cache" always;
+              add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+              add_header Pragma "no-cache" always;
               try_files $uri =404;
           }}
 
@@ -347,7 +420,8 @@ write_files:
           }}
 
           location / {{
-              add_header Cache-Control "no-cache" always;
+              add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+              add_header Pragma "no-cache" always;
               try_files $uri $uri/ /index.html;
           }}
       }}
