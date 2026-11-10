@@ -182,7 +182,10 @@ def component_for_repository(repository_url:str)->str:
 def register_release_candidate(component:str,candidate:dict[str,Any],source_event_id:str|None=None)->dict[str,Any]:
     repository=canonical_repository(candidate["repository_url"]);sha=str(candidate["git_commit_sha"]).lower();version=str(candidate["version"])
     commit_date=candidate.get("committed_at")
-    existing=db.one("SELECT * FROM releases WHERE component=? AND repository_url=? AND git_commit_sha=?",(component,repository,sha))
+    # Match existing by (component, git_commit_sha) first regardless of URL variation (.git etc.)
+    existing=db.one("SELECT * FROM releases WHERE component=? AND git_commit_sha=?",(component,sha))
+    if not existing:
+        existing=db.one("SELECT * FROM releases WHERE component=? AND repository_url=? AND git_commit_sha=?",(component,repository,sha))
     if existing:
         if version and not version.startswith("commit-") and str(existing.get("version") or "").startswith("commit-"):
             conflict=db.one("SELECT id FROM releases WHERE component=? AND version=? AND channel=? AND id<>?",(component,version,existing.get("channel") or "stable",existing["id"]))
@@ -192,7 +195,17 @@ def register_release_candidate(component:str,candidate:dict[str,Any],source_even
         if commit_date and existing.get("created_at")!=commit_date:
             db.execute("UPDATE releases SET created_at=? WHERE id=?",(commit_date,existing["id"]))
             existing["created_at"]=commit_date
+        if existing.get("repository_url")!=repository:
+            db.execute("UPDATE releases SET repository_url=? WHERE id=?",(repository,existing["id"]))
+            existing["repository_url"]=repository
         return existing
+
+    # Ensure version doesn't violate UNIQUE(component, version, channel)
+    channel="stable"
+    existing_version=db.one("SELECT id FROM releases WHERE component=? AND version=? AND channel=?",(component,version,channel))
+    if existing_version:
+        version=f"{version}-{sha[:7]}"
+
     release_id,now=identifier(),utc_now()
     created_at=commit_date or now
     manifest={"schema":"vtab-controlled-release","version":1,"sourceOnly":True,"component":component,"repository":repository,"commitSha":sha}
@@ -200,7 +213,7 @@ def register_release_candidate(component:str,candidate:dict[str,Any],source_even
     validation_details={"approved":False,"source":"github_commit","author":str(candidate.get("author") or "Unknown author"),"message":str(candidate.get("message") or candidate.get("release_notes") or ""),"committedAt":commit_date}
     db.execute("""INSERT INTO releases(id,component,version,channel,status,artifact_url,checksum_sha256,release_notes,manifest_json,git_commit_sha,repository_url,migration_index,validation_status,validation_details_json,source_event_id,created_at)
                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-               (release_id,component,version,"stable","pending_approval",candidate["artifact_url"],checksum,candidate.get("release_notes") or candidate.get("message") or "",json.dumps(manifest),sha,repository,0,"pending",json.dumps(validation_details),source_event_id,created_at))
+               (release_id,component,version,channel,"pending_approval",candidate["artifact_url"],checksum,candidate.get("release_notes") or candidate.get("message") or "",json.dumps(manifest),sha,repository,0,"pending",json.dumps(validation_details),source_event_id,created_at))
     db.audit("github-control-plane","release.candidate_registered","release",release_id,details={"component":component,"repository":repository,"commitSha":sha,"event":source_event_id})
     return db.one("SELECT * FROM releases WHERE id=?",(release_id,)) or {}
 
@@ -503,8 +516,12 @@ def github_releases(_: str = Depends(require_operator)):
     try:
         with urllib.request.urlopen(request, timeout=12) as response:
             payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        logger.warning("GitHub releases endpoint returned HTTP %s", error.code)
+        return {"configured": True, "repository": configuration["repository"], "releases": []}
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-        raise HTTPException(502, f"GitHub release discovery failed: {error}") from error
+        logger.warning("GitHub releases discovery failed: %s", error)
+        return {"configured": True, "repository": configuration["repository"], "releases": []}
     releases = [{
         "tag": item.get("tag_name"), "name": item.get("name") or item.get("tag_name"),
         "url": item.get("html_url"), "publishedAt": item.get("published_at"),
@@ -551,8 +568,12 @@ def sync_github_releases(payload:GitHubSyncRequest,actor:OperatorIdentity=Depend
     try:version_tags=discover_version_tags(repository)
     except HTTPException:version_tags={}
     for candidate in discovered:
-        candidate["version"]=version_tags.get(str(candidate.get("git_commit_sha") or "").lower(),candidate["version"])
-        candidate["release_notes"]=candidate.pop("message","");registered.append(serialize_row(register_release_candidate(payload.component,candidate)))
+        try:
+            candidate["version"]=version_tags.get(str(candidate.get("git_commit_sha") or "").lower(),candidate["version"])
+            candidate["release_notes"]=candidate.pop("message","")
+            registered.append(serialize_row(register_release_candidate(payload.component,candidate)))
+        except Exception as exc:
+            logger.warning("Failed to register %s candidate %s: %s", payload.component, candidate.get("git_commit_sha"), exc)
     db.audit(str(actor),"release.github_sync","release",details={"component":payload.component,"repository":repository,"branch":payload.branch,"count":len(registered)})
     return {"component":payload.component,"repository":repository,"branch":payload.branch,"releases":registered}
 
