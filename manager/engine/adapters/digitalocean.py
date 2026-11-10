@@ -159,6 +159,14 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
 
             self.run_ssh_command(host, port, user, f"mkdir -p '{target_dir}'", key_data=key_data)
 
+            # Ensure essential runtime tools exist on the host (Docker, Nginx, Node.js) if deploying to a clean server
+            ensure_tools_cmd = (
+                "which docker >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq docker.io && systemctl enable --now docker); "
+                "which nginx >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq nginx && systemctl enable --now nginx); "
+                "which node >/dev/null 2>&1 || (curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y -qq nodejs)"
+            )
+            self.run_ssh_command(host, port, user, ensure_tools_cmd, key_data=key_data, timeout=180)
+
             # Git clone or init/fetch if not present, then checkout approved commit
             commit_sha = str(config.get("approved_commit_sha") or "").strip(strip_chars).replace("`", "")
             if repository:
@@ -259,8 +267,53 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                 )
                 self.run_ssh_command(host, port, user, trigger_cmd, key_data=key_data)
 
-                # Ensure Nginx site is enabled for reportingtool
-                nginx_cmd = "if [ -f /etc/nginx/sites-available/reportingtool ]; then ln -sf /etc/nginx/sites-available/reportingtool /etc/nginx/sites-enabled/reportingtool; nginx -t && systemctl reload nginx; fi"
+                # Ensure Nginx site is enabled for reportingtool (create default configuration if missing)
+                nginx_site_conf = (
+                    f"server {{\n"
+                    f"    server_name {domain or 'reportservices.vtabsquare.com'};\n\n"
+                    f"    client_max_body_size 100M;\n"
+                    f"    client_body_buffer_size 16M;\n"
+                    f"    client_body_timeout 120s;\n\n"
+                    f"    root {target_dir}/dist-web;\n"
+                    f"    index index.html;\n\n"
+                    f"    location = /index.html {{\n"
+                    f'        add_header Cache-Control "no-store, no-cache, must-revalidate" always;\n'
+                    f'        add_header Pragma "no-cache" always;\n'
+                    f"        try_files $uri =404;\n"
+                    f"    }}\n\n"
+                    f"    location /assets/ {{\n"
+                    f'        add_header Cache-Control "public, max-age=31536000, immutable" always;\n'
+                    f"        try_files $uri =404;\n"
+                    f"    }}\n\n"
+                    f"    location / {{\n"
+                    f'        add_header Cache-Control "no-store, no-cache, must-revalidate" always;\n'
+                    f'        add_header Pragma "no-cache" always;\n'
+                    f"        try_files $uri $uri/ /index.html;\n"
+                    f"    }}\n\n"
+                    f"    location /api/ {{\n"
+                    f"        client_max_body_size 100M;\n"
+                    f"        proxy_pass http://127.0.0.1:{profile.port}/api/;\n"
+                    f"        proxy_http_version 1.1;\n"
+                    f"        proxy_set_header Host $host;\n"
+                    f"        proxy_set_header X-Real-IP $remote_addr;\n"
+                    f"        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                    f"        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                    f"        proxy_connect_timeout 10s;\n"
+                    f"        proxy_send_timeout 300s;\n"
+                    f"        proxy_read_timeout 300s;\n"
+                    f"    }}\n\n"
+                    f"    listen 80;\n"
+                    f"}}\n"
+                )
+                b64_nginx = base64.b64encode(nginx_site_conf.encode("utf-8")).decode("ascii")
+                nginx_cmd = (
+                    f"if [ ! -f /etc/nginx/sites-available/reportingtool ]; then "
+                    f"echo '{b64_nginx}' | base64 -d > /etc/nginx/sites-available/reportingtool; "
+                    f"fi; "
+                    f"ln -sf /etc/nginx/sites-available/reportingtool /etc/nginx/sites-enabled/reportingtool; "
+                    f"rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true; "
+                    f"nginx -t && systemctl reload nginx 2>/dev/null || true"
+                )
                 self.run_ssh_command(host, port, user, nginx_cmd, key_data=key_data)
 
                 # Ensure Docker image exists; build if missing
