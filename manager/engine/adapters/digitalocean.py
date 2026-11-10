@@ -223,6 +223,8 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                     environment["VTAB_RELEASE_VERSION"] = rel_ver
                 else:
                     environment.setdefault("VTAB_RELEASE_VERSION", "6.1.12")
+                for render_k in ("RENDER_SERVICE_ID", "VTAB_RENDER_SERVICE_ID", "RENDER_API_KEY", "RENDER_TOKEN", "RENDER_API_TOKEN"):
+                    environment.pop(render_k, None)
 
             env_lines = [f"{k.strip(strip_chars).replace('*', '')}={str(v).strip(strip_chars).replace('`', '').replace('*', '')}" for k, v in sorted(environment.items())]
             env_content = "\n".join(env_lines) + "\n"

@@ -1521,6 +1521,9 @@ def wizard_preflight(payload: WizardPreflightRequest, actor: OperatorIdentity = 
     ssl = bool(payload.provider_config.get("ssl", False))
     resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
     payload.environment_variables.setdefault("VTAB_WEB_URL", resolved_web_url)
+    if payload.provider == "digitalocean":
+        for render_k in ("RENDER_SERVICE_ID", "VTAB_RENDER_SERVICE_ID", "RENDER_API_KEY", "RENDER_TOKEN", "RENDER_API_TOKEN"):
+            payload.environment_variables.pop(render_k, None)
 
     return DeploymentEngine(db).preflight(payload, token, payload.verify_provider)
 
@@ -1555,6 +1558,9 @@ def wizard_execute(payload: WizardExecuteRequest, background_tasks: BackgroundTa
     ssl = bool(payload.provider_config.get("ssl", False))
     resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
     payload.environment_variables.setdefault("VTAB_WEB_URL", resolved_web_url)
+    if payload.provider == "digitalocean":
+        for render_k in ("RENDER_SERVICE_ID", "VTAB_RENDER_SERVICE_ID", "RENDER_API_KEY", "RENDER_TOKEN", "RENDER_API_TOKEN"):
+            payload.environment_variables.pop(render_k, None)
 
     preflight = DeploymentEngine(db).preflight(payload, token, True)
     if not preflight["approved"]:
