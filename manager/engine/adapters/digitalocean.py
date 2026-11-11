@@ -151,7 +151,10 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
             target_dir = raw_target_dir if raw_target_dir else default_dir
             domain = str(config.get("domain") or "").strip(strip_chars).replace("`", "").replace("*", "")
             ssl = bool(config.get("ssl", False))
-            url = (f"https://{domain}" if ssl else f"http://{domain}") if domain else f"http://{host}:{profile.port}"
+            if profile.key == "administration":
+                url = f"https://{domain}" if (ssl and domain and not domain.endswith("vtabsquare.com")) else "https://admin-reporting.139.59.32.39.nip.io"
+            else:
+                url = (f"https://{domain}" if ssl else f"http://{domain}") if domain else f"http://{host}:{profile.port}"
 
             test = self.test_ssh_connection(host, port, user, key_data)
             if not test.get("authenticated"):
@@ -243,7 +246,7 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                 environment.setdefault("VITE_SUPABASE_URL", environment["SUPABASE_URL"])
                 environment.setdefault("PORT", "8835")
                 environment.setdefault("SERVICES_API_URL", "https://reportservices.vtabsquare.com/api/v1")
-                resolved_admin_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "http://admin-reporting.vtabsquare.com")
+                resolved_admin_url = f"https://{domain}" if (ssl and domain and not domain.endswith("vtabsquare.com")) else "https://admin-reporting.139.59.32.39.nip.io"
                 environment.setdefault("VTAB_ADMIN_URL", resolved_admin_url)
                 if commit_sha:
                     environment["VTAB_RELEASE_COMMIT_SHA"] = commit_sha[:8]
@@ -404,11 +407,49 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                 if code != 0:
                     raise RuntimeError(f"Failed to start reportingtool-admin.service: {err or out}")
 
-                # Ensure Nginx reverse proxy configuration exists
+                # Ensure Nginx reverse proxy configuration exists (HTTP and HTTPS)
                 admin_nginx_conf = (
                     f"server {{\n"
                     f"    listen 80;\n"
-                    f"    server_name {domain or 'admin-reporting.vtabsquare.com'} admin-reporting.139.59.32.39.nip.io admin-reporting.139.59.32.39.sslip.io;\n\n"
+                    f"    server_name {domain or 'admin-reporting.139.59.32.39.nip.io'} admin-reporting.139.59.32.39.nip.io admin-reporting.139.59.32.39.sslip.io admin-reporting.vtabsquare.com;\n\n"
+                    f"    client_max_body_size 50M;\n"
+                    f"    client_body_buffer_size 16M;\n\n"
+                    f"    root {target_dir}/dist;\n"
+                    f"    index index.html;\n\n"
+                    f"    location = /index.html {{\n"
+                    f'        add_header Cache-Control "no-store, no-cache, must-revalidate" always;\n'
+                    f'        add_header Pragma "no-cache" always;\n'
+                    f"        try_files $uri =404;\n"
+                    f"    }}\n\n"
+                    f"    location /assets/ {{\n"
+                    f'        add_header Cache-Control "public, max-age=31536000, immutable" always;\n'
+                    f"        try_files $uri =404;\n"
+                    f"    }}\n\n"
+                    f"    location / {{\n"
+                    f'        add_header Cache-Control "no-store, no-cache, must-revalidate" always;\n'
+                    f'        add_header Pragma "no-cache" always;\n'
+                    f"        try_files $uri $uri/ /index.html;\n"
+                    f"    }}\n\n"
+                    f"    location /api/ {{\n"
+                    f"        client_max_body_size 50M;\n"
+                    f"        proxy_pass http://127.0.0.1:{profile.port}/api/;\n"
+                    f"        proxy_http_version 1.1;\n"
+                    f"        proxy_set_header Host $host;\n"
+                    f"        proxy_set_header X-Real-IP $remote_addr;\n"
+                    f"        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                    f"        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                    f"        proxy_connect_timeout 10s;\n"
+                    f"        proxy_send_timeout 120s;\n"
+                    f"        proxy_read_timeout 120s;\n"
+                    f"    }}\n"
+                    f"}}\n\n"
+                    f"server {{\n"
+                    f"    listen 443 ssl http2;\n"
+                    f"    server_name {domain or 'admin-reporting.139.59.32.39.nip.io'} admin-reporting.139.59.32.39.nip.io admin-reporting.139.59.32.39.sslip.io admin-reporting.vtabsquare.com;\n\n"
+                    f"    ssl_certificate /etc/letsencrypt/live/admin-reporting.139.59.32.39.nip.io/fullchain.pem;\n"
+                    f"    ssl_certificate_key /etc/letsencrypt/live/admin-reporting.139.59.32.39.nip.io/privkey.pem;\n"
+                    f"    include /etc/letsencrypt/options-ssl-nginx.conf;\n"
+                    f"    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;\n\n"
                     f"    client_max_body_size 50M;\n"
                     f"    client_body_buffer_size 16M;\n\n"
                     f"    root {target_dir}/dist;\n"
