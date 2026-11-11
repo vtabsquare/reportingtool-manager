@@ -127,10 +127,10 @@ function deploymentTargetUrl(row){
   if(!row) return '';
   const notes=(()=>{try{return JSON.parse(row.agent_notes||'{}')}catch(e){return {}}})();
   let url = (notes.provider?.url || '').trim();
-  if(!url || url.includes('admin-reporting.vtabsquare.com')){
+  if(!url){
     const client=(state.clients||[]).find(c=>c.id===row.client_id);
     if(row.component==='services') url = client?.services_url || 'https://reportservices.vtabsquare.com';
-    else if(row.component==='administration') url = (client?.admin_url && !client.admin_url.includes('admin-reporting.vtabsquare.com')) ? client.admin_url : 'https://admin-reporting.139.59.32.39.nip.io';
+    else if(row.component==='administration') url = client?.admin_url || 'https://admin-reporting.vtabsquare.com';
   }
   if(url){
     url = url.replace(/[`'"]/g, '').trim();
@@ -591,12 +591,12 @@ function wizardPlan(){
   if (application === 'administration' || application === 'both') {
     environment_variables.PORT = '8835';
     environment_variables.SERVICES_API_URL = environment_variables.SERVICES_API_URL || 'https://reportservices.vtabsquare.com/api/v1';
-    environment_variables.VTAB_ADMIN_URL = environment_variables.VTAB_ADMIN_URL || (data.domain && !data.domain.includes('admin-reporting.vtabsquare.com') ? `https://${data.domain}` : 'https://admin-reporting.139.59.32.39.nip.io');
+    environment_variables.VTAB_ADMIN_URL = environment_variables.VTAB_ADMIN_URL || (data.domain ? `https://${data.domain}` : 'https://admin-reporting.vtabsquare.com');
   }
   const release_ids={};if(application!=='administration'&&data.services_release)release_ids.services=data.services_release;if(application!=='services'&&data.administration_release)release_ids.administration=data.administration_release;
   const cleanVal=v=>typeof v==='string'?v.replace(/^[`'"\s]+|[`'"\s]+$/g,''):v;
   const targetDir=cleanVal(data.target_dir)||(application==='administration'?'/var/www/reportingtool-admin':'/var/www/reportingtool-webservice');
-  const domain=cleanVal(data.domain)||(application==='administration'?'admin-reporting.139.59.32.39.nip.io':'reportservices.vtabsquare.com');
+  const domain=cleanVal(data.domain)||(application==='administration'?'admin-reporting.vtabsquare.com':'reportservices.vtabsquare.com');
   const host=cleanVal(data.host)||state.settings?.server?.host||'139.59.32.39';
   const sshUser=cleanVal(data.ssh_user)||state.settings?.server?.ssh_user||'root';
   const sshPort=Number(cleanVal(data.ssh_port)||state.settings?.server?.ssh_port||22);
