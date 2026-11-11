@@ -630,17 +630,20 @@ def finalize_healthy_deployment_if_ready(deployment: Any) -> Any:
     if not unique_urls:
         return deployment
 
-    health_path = "/api/v1/health" if component == "services" else "/api/session"
+    health_path = "/api/v1/health"
     verified_url = None
     for cand in unique_urls:
         res = HealthCheckService().check(cand, health_path, timeout=3)
+        if not res.get("healthy") and component == "administration":
+            res = HealthCheckService().check(cand, "/api/session", timeout=3)
         if res.get("healthy"):
             verified_url = cand
             break
 
     if not verified_url and host:
+        local_port = 8820 if component == "services" else 8835
         code, _, _ = DigitalOceanDeploymentAdapter.run_ssh_command(
-            host, 22, "root", f"curl -s -f http://127.0.0.1:8820{health_path}", timeout=4
+            host, 22, "root", f"curl -s -f http://127.0.0.1:{local_port}{health_path} || curl -s -f http://127.0.0.1:{local_port}/api/session", timeout=4
         )
         if code == 0:
             verified_url = unique_urls[0]
@@ -1207,6 +1210,8 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
                 targets.add("https://vtab-production.onrender.com")
                 targets.add("http://v2-reports.139.59.32.39.nip.io")
             else:
+                targets.add("http://admin-reporting.vtabsquare.com")
+                targets.add("http://admin-reporting.139.59.32.39.nip.io")
                 targets.add("https://vtab-client-adminnn.onrender.com")
                 targets.add("http://v2-admin.139.59.32.39.nip.io")
 
@@ -1216,6 +1221,9 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
             urls.append("https://reportservices.vtabsquare.com/api/v1/update/offer")
             urls.append("http://127.0.0.1:8820/api/v1/update/offer")
         else:
+            urls.append("http://admin-reporting.vtabsquare.com/api/update/offer")
+            urls.append("http://admin-reporting.139.59.32.39.nip.io/api/update/offer")
+            urls.append("http://127.0.0.1:8835/api/update/offer")
             urls.append("https://admin-reporting.vtabsquare.com/api/update/offer")
             urls.append("https://vtab-client-adminnn.onrender.com/api/update/offer")
 
@@ -1268,15 +1276,25 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
 
             # Direct droplet delivery over SSH if DigitalOcean host is configured
             try:
-                DigitalOceanDeploymentAdapter.run_ssh_command(
-                    "139.59.32.39", 22, "root",
-                    f"python3 /var/www/reportingtool-webservice/scripts/send_update_offer.py {commit_sha or deployment.get('target_version', '')} {deployment.get('target_version', '')}",
-                    timeout=8
-                )
-                target_arg = commit_sha or deployment.get("target_version", "")
-                if deployment.get("deployment_type") == "rollback" and target_arg:
-                    DigitalOceanDeploymentAdapter.run_ssh_command("139.59.32.39", 22, "root", f"bash /var/www/reportingtool-webservice/deploy.sh {target_arg}", timeout=45
-                )
+                if component == "services":
+                    DigitalOceanDeploymentAdapter.run_ssh_command(
+                        "139.59.32.39", 22, "root",
+                        f"python3 /var/www/reportingtool-webservice/scripts/send_update_offer.py {commit_sha or deployment.get('target_version', '')} {deployment.get('target_version', '')}",
+                        timeout=8
+                    )
+                    target_arg = commit_sha or deployment.get("target_version", "")
+                    if deployment.get("deployment_type") == "rollback" and target_arg:
+                        DigitalOceanDeploymentAdapter.run_ssh_command("139.59.32.39", 22, "root", f"bash /var/www/reportingtool-webservice/deploy.sh {target_arg}", timeout=45)
+                else:
+                    b64_body = base64.b64encode(body).decode("ascii")
+                    DigitalOceanDeploymentAdapter.run_ssh_command(
+                        "139.59.32.39", 22, "root",
+                        f"echo '{b64_body}' | base64 -d | curl -s -X POST http://127.0.0.1:8835/api/update/offer -H 'Content-Type: application/json' -H 'X-VTAB-Agent-Token: SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y' -d @-",
+                        timeout=8
+                    )
+                    target_arg = commit_sha or deployment.get("target_version", "")
+                    if deployment.get("deployment_type") == "rollback" and target_arg:
+                        DigitalOceanDeploymentAdapter.run_ssh_command("139.59.32.39", 22, "root", f"bash /var/www/reportingtool-admin/deploy.sh {target_arg}", timeout=45)
             except Exception:
                 pass
 
@@ -1310,7 +1328,7 @@ def dispatch_client_update_cancellation(client_id: str, deployment_id: str):
 
         urls = [f"{target_url}/api/v1/update/webhook" if component == "services" else f"{target_url}/api/update/webhook"]
         if "localhost" not in target_url and "127.0.0.1" not in target_url:
-            local_fallback = "http://127.0.0.1:8830/api/v1/update/webhook" if component == "services" else "http://127.0.0.1:8000/api/update/webhook"
+            local_fallback = "http://127.0.0.1:8820/api/v1/update/webhook" if component == "services" else "http://127.0.0.1:8835/api/update/webhook"
             urls.append(local_fallback)
 
         def _send():
@@ -1521,6 +1539,10 @@ def wizard_preflight(payload: WizardPreflightRequest, actor: OperatorIdentity = 
     ssl = bool(payload.provider_config.get("ssl", False))
     resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
     payload.environment_variables.setdefault("VTAB_WEB_URL", resolved_web_url)
+    resolved_admin_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "http://admin-reporting.vtabsquare.com")
+    payload.environment_variables.setdefault("VTAB_ADMIN_URL", resolved_admin_url)
+    payload.environment_variables.setdefault("PORT", "8835")
+    payload.environment_variables.setdefault("SERVICES_API_URL", "https://reportservices.vtabsquare.com/api/v1")
     if payload.provider == "digitalocean":
         for render_k in ("RENDER_SERVICE_ID", "VTAB_RENDER_SERVICE_ID", "RENDER_API_KEY", "RENDER_TOKEN", "RENDER_API_TOKEN"):
             payload.environment_variables.pop(render_k, None)
@@ -1558,6 +1580,10 @@ def wizard_execute(payload: WizardExecuteRequest, background_tasks: BackgroundTa
     ssl = bool(payload.provider_config.get("ssl", False))
     resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
     payload.environment_variables.setdefault("VTAB_WEB_URL", resolved_web_url)
+    resolved_admin_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "http://admin-reporting.vtabsquare.com")
+    payload.environment_variables.setdefault("VTAB_ADMIN_URL", resolved_admin_url)
+    payload.environment_variables.setdefault("PORT", "8835")
+    payload.environment_variables.setdefault("SERVICES_API_URL", "https://reportservices.vtabsquare.com/api/v1")
     if payload.provider == "digitalocean":
         for render_k in ("RENDER_SERVICE_ID", "VTAB_RENDER_SERVICE_ID", "RENDER_API_KEY", "RENDER_TOKEN", "RENDER_API_TOKEN"):
             payload.environment_variables.pop(render_k, None)

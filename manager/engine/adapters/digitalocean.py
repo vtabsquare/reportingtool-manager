@@ -159,11 +159,13 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
 
             self.run_ssh_command(host, port, user, f"mkdir -p '{target_dir}'", key_data=key_data)
 
-            # Ensure essential runtime tools exist on the host (Docker, Nginx, Node.js) if deploying to a clean server
+            # Ensure essential runtime tools exist on the host (Docker, Nginx, Node.js, Python3 venv) if deploying to a clean server
             ensure_tools_cmd = (
                 "which docker >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq docker.io && systemctl enable --now docker); "
                 "which nginx >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq nginx && systemctl enable --now nginx); "
-                "which node >/dev/null 2>&1 || (curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y -qq nodejs)"
+                "which node >/dev/null 2>&1 || (curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y -qq nodejs); "
+                "which python3 >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq python3 python3-pip python3-venv); "
+                "dpkg -s python3-venv >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq python3-venv python3-pip)"
             )
             self.run_ssh_command(host, port, user, ensure_tools_cmd, key_data=key_data, timeout=180)
 
@@ -185,6 +187,9 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
             # Rebuild frontend web distribution if source package exists
             if profile.key == "services":
                 build_cmd = f"if [ -f '{target_dir}/package.json' ]; then cd '{target_dir}' && npm run build:web 2>&1 && chown -R www-data:www-data '{target_dir}/dist-web' 2>/dev/null || true; fi"
+                self.run_ssh_command(host, port, user, build_cmd, key_data=key_data, timeout=120)
+            elif profile.key == "administration":
+                build_cmd = f"if [ -f '{target_dir}/package.json' ]; then cd '{target_dir}' && (npm ci 2>&1 || npm install 2>&1) && npm run build 2>&1 && chown -R www-data:www-data '{target_dir}/dist' 2>/dev/null || true; fi"
                 self.run_ssh_command(host, port, user, build_cmd, key_data=key_data, timeout=120)
 
             # Atomic environment configuration (strip any accidental markdown backticks or quotes)
@@ -223,6 +228,30 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                     environment["VTAB_RELEASE_VERSION"] = rel_ver
                 else:
                     environment.setdefault("VTAB_RELEASE_VERSION", "6.1.12")
+                for render_k in ("RENDER_SERVICE_ID", "VTAB_RENDER_SERVICE_ID", "RENDER_API_KEY", "RENDER_TOKEN", "RENDER_API_TOKEN"):
+                    environment.pop(render_k, None)
+            elif profile.key == "administration":
+                environment.setdefault("VTAB_AGENT_TOKEN", "SDCsfIsSnlOj4ceWprbj-0GrsjxESrOT1DnmNJOGa_Y")
+                environment.setdefault("VTAB_MANAGER_URL", "https://manager.139.59.32.39.nip.io")
+                environment.setdefault("VTAB_CLIENT_ID", "65805eab-d112-4b8f-b46d-a8f2dcd8cf0b")
+                environment.setdefault("VTAB_AUTO_OFFER_GITHUB", "false")
+                environment.setdefault("VTAB_SIMULATE_BUILD", "0")
+                environment.setdefault("ADMIN_OTP_ENABLED", "1")
+                environment.setdefault("ADMIN_EMAIL", "harishkadhi18022001@gmail.com")
+                environment.setdefault("VTAB_SMTP_FROM", "aivtabsquare@gmail.com")
+                environment.setdefault("SUPABASE_URL", "https://asjscibujiikthxmpxgg.supabase.co")
+                environment.setdefault("VITE_SUPABASE_URL", environment["SUPABASE_URL"])
+                environment.setdefault("PORT", "8835")
+                environment.setdefault("SERVICES_API_URL", "https://reportservices.vtabsquare.com/api/v1")
+                resolved_admin_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "http://admin-reporting.vtabsquare.com")
+                environment.setdefault("VTAB_ADMIN_URL", resolved_admin_url)
+                if commit_sha:
+                    environment["VTAB_RELEASE_COMMIT_SHA"] = commit_sha[:8]
+                rel_ver = str(config.get("version") or config.get("target_version") or "").replace("commit-", "")
+                if rel_ver:
+                    environment["VTAB_ADMIN_VERSION"] = rel_ver
+                else:
+                    environment.setdefault("VTAB_ADMIN_VERSION", "2.2.0")
                 for render_k in ("RENDER_SERVICE_ID", "VTAB_RENDER_SERVICE_ID", "RENDER_API_KEY", "RENDER_TOKEN", "RENDER_API_TOKEN"):
                     environment.pop(render_k, None)
 
@@ -333,12 +362,92 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                     raise RuntimeError(f"Failed to launch container {container}: {err or out}")
             else:
                 # Administration tool
-                nginx_cmd = "if [ -f /etc/nginx/sites-available/reportingtool-admin ]; then ln -sf /etc/nginx/sites-available/reportingtool-admin /etc/nginx/sites-enabled/reportingtool-admin; nginx -t && systemctl reload nginx; fi"
-                self.run_ssh_command(host, port, user, nginx_cmd, key_data=key_data)
-                restart_cmd = "systemctl daemon-reload && (systemctl restart reportingtool-admin || systemctl restart vtab-admin)"
-                code, out, err = self.run_ssh_command(host, port, user, restart_cmd, key_data=key_data, timeout=30)
+                # Ensure Python virtual environment exists and dependencies are installed
+                setup_venv_cmd = (
+                    f"if [ ! -d '{backend_dir}/venv' ]; then python3 -m venv '{backend_dir}/venv'; fi; "
+                    f"'{backend_dir}/venv/bin/pip' install --upgrade pip -q; "
+                    f"if [ -f '{backend_dir}/requirements.txt' ]; then '{backend_dir}/venv/bin/pip' install -r '{backend_dir}/requirements.txt' -q; fi"
+                )
+                self.run_ssh_command(host, port, user, setup_venv_cmd, key_data=key_data, timeout=180)
+
+                # Ensure deploy script and dist permissions
+                setup_perms_cmd = (
+                    f"chmod +x '{target_dir}/deploy.sh' '{target_dir}/deploy/deploy.sh' 2>/dev/null || true; "
+                    f"chown -R www-data:www-data '{target_dir}/dist' 2>/dev/null || true; "
+                    f"chmod -R 755 '{target_dir}/dist' 2>/dev/null || true"
+                )
+                self.run_ssh_command(host, port, user, setup_perms_cmd, key_data=key_data)
+
+                # Ensure systemd service unit exists
+                admin_unit = (
+                    f"[Unit]\n"
+                    f"Description=VTAB Reporting Tool Admin API Backend\n"
+                    f"After=network.target\n\n"
+                    f"[Service]\n"
+                    f"Type=simple\n"
+                    f"User=root\n"
+                    f"WorkingDirectory={backend_dir}\n"
+                    f"EnvironmentFile={env_file}\n"
+                    f"ExecStart={backend_dir}/venv/bin/uvicorn main:app --host 127.0.0.1 --port {profile.port}\n"
+                    f"Restart=always\n"
+                    f"RestartSec=3\n\n"
+                    f"[Install]\n"
+                    f"WantedBy=multi-user.target\n"
+                )
+                b64_unit = base64.b64encode(admin_unit.encode("utf-8")).decode("ascii")
+                unit_cmd = (
+                    f"echo '{b64_unit}' | base64 -d > /etc/systemd/system/reportingtool-admin.service && "
+                    f"systemctl daemon-reload && systemctl enable --now reportingtool-admin.service && "
+                    f"systemctl restart reportingtool-admin.service"
+                )
+                code, out, err = self.run_ssh_command(host, port, user, unit_cmd, key_data=key_data, timeout=30)
                 if code != 0:
-                    raise RuntimeError(f"Failed to restart admin service: {err or out}")
+                    raise RuntimeError(f"Failed to start reportingtool-admin.service: {err or out}")
+
+                # Ensure Nginx reverse proxy configuration exists
+                admin_nginx_conf = (
+                    f"server {{\n"
+                    f"    listen 80;\n"
+                    f"    server_name {domain or 'admin-reporting.vtabsquare.com'} admin-reporting.139.59.32.39.nip.io admin-reporting.139.59.32.39.sslip.io;\n\n"
+                    f"    client_max_body_size 50M;\n"
+                    f"    client_body_buffer_size 16M;\n\n"
+                    f"    root {target_dir}/dist;\n"
+                    f"    index index.html;\n\n"
+                    f"    location = /index.html {{\n"
+                    f'        add_header Cache-Control "no-store, no-cache, must-revalidate" always;\n'
+                    f'        add_header Pragma "no-cache" always;\n'
+                    f"        try_files $uri =404;\n"
+                    f"    }}\n\n"
+                    f"    location /assets/ {{\n"
+                    f'        add_header Cache-Control "public, max-age=31536000, immutable" always;\n'
+                    f"        try_files $uri =404;\n"
+                    f"    }}\n\n"
+                    f"    location / {{\n"
+                    f'        add_header Cache-Control "no-store, no-cache, must-revalidate" always;\n'
+                    f'        add_header Pragma "no-cache" always;\n'
+                    f"        try_files $uri $uri/ /index.html;\n"
+                    f"    }}\n\n"
+                    f"    location /api/ {{\n"
+                    f"        client_max_body_size 50M;\n"
+                    f"        proxy_pass http://127.0.0.1:{profile.port}/api/;\n"
+                    f"        proxy_http_version 1.1;\n"
+                    f"        proxy_set_header Host $host;\n"
+                    f"        proxy_set_header X-Real-IP $remote_addr;\n"
+                    f"        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                    f"        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                    f"        proxy_connect_timeout 10s;\n"
+                    f"        proxy_send_timeout 120s;\n"
+                    f"        proxy_read_timeout 120s;\n"
+                    f"    }}\n"
+                    f"}}\n"
+                )
+                b64_nginx = base64.b64encode(admin_nginx_conf.encode("utf-8")).decode("ascii")
+                nginx_cmd = (
+                    f"echo '{b64_nginx}' | base64 -d > /etc/nginx/sites-available/reportingtool-admin && "
+                    f"ln -sf /etc/nginx/sites-available/reportingtool-admin /etc/nginx/sites-enabled/reportingtool-admin && "
+                    f"nginx -t && systemctl reload nginx 2>/dev/null || true"
+                )
+                self.run_ssh_command(host, port, user, nginx_cmd, key_data=key_data)
 
             return {
                 "resource_id": f"droplet-{host}",

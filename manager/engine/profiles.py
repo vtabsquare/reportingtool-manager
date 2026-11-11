@@ -35,11 +35,11 @@ application_profiles = {
     ),
     "administration": ApplicationProfile(
         key="administration", name="VTAB Admin Console", repository_setting="admin_repository",
-        python_version="3.10+", node_version="18.18+", backend_entry="backend/main.py", port=8000,
-        frontend_build="npm ci && npm run build", health_path="/api/session",
+        python_version="3.10+", node_version="18.18+", backend_entry="backend/main.py", port=8835,
+        frontend_build="npm ci && npm run build", health_path="/api/v1/health",
         required_secrets=("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "BREVO_API_KEY", "ADMIN_EMAIL"),
         build_command="pip install -r backend/requirements.txt && npm ci && npm run build",
-        start_command="uvicorn backend.main:app --host 0.0.0.0 --port 8000",
+        start_command="uvicorn backend.main:app --host 0.0.0.0 --port 8835",
     ),
 }
 

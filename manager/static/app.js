@@ -588,6 +588,11 @@ function wizardPlan(){
   environment_variables.VTAB_SMTP_FROM = environment_variables.VTAB_SMTP_FROM || 'aivtabsquare@gmail.com';
   environment_variables.SUPABASE_URL = environment_variables.SUPABASE_URL || 'https://asjscibujiikthxmpxgg.supabase.co';
   environment_variables.VITE_SUPABASE_URL = environment_variables.SUPABASE_URL;
+  if (application === 'administration' || application === 'both') {
+    environment_variables.PORT = '8835';
+    environment_variables.SERVICES_API_URL = environment_variables.SERVICES_API_URL || 'https://reportservices.vtabsquare.com/api/v1';
+    environment_variables.VTAB_ADMIN_URL = environment_variables.VTAB_ADMIN_URL || `http://${data.domain || 'admin-reporting.vtabsquare.com'}`;
+  }
   const release_ids={};if(application!=='administration'&&data.services_release)release_ids.services=data.services_release;if(application!=='services'&&data.administration_release)release_ids.administration=data.administration_release;
   const cleanVal=v=>typeof v==='string'?v.replace(/^[`'"\s]+|[`'"\s]+$/g,''):v;
   const targetDir=cleanVal(data.target_dir)||(application==='administration'?'/var/www/reportingtool-admin':'/var/www/reportingtool-webservice');
