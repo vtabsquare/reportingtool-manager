@@ -220,6 +220,8 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                 environment.setdefault("ADMIN_OTP_ENABLED", "1")
                 environment.setdefault("ADMIN_EMAIL", "harishkadhi18022001@gmail.com")
                 environment.setdefault("VTAB_SMTP_FROM", "aivtabsquare@gmail.com")
+                if environment.get("BREVO_API_KEY") and not str(environment["BREVO_API_KEY"]).startswith("xkeysib-"):
+                    environment["BREVO_API_KEY"] = f"xkeysib-{environment['BREVO_API_KEY']}"
                 environment.setdefault("SUPABASE_URL", "https://asjscibujiikthxmpxgg.supabase.co")
                 environment.setdefault("VITE_SUPABASE_URL", environment["SUPABASE_URL"])
                 resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
@@ -242,6 +244,8 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                 environment.setdefault("ADMIN_OTP_ENABLED", "1")
                 environment.setdefault("ADMIN_EMAIL", "harishkadhi18022001@gmail.com")
                 environment.setdefault("VTAB_SMTP_FROM", "aivtabsquare@gmail.com")
+                if environment.get("BREVO_API_KEY") and not str(environment["BREVO_API_KEY"]).startswith("xkeysib-"):
+                    environment["BREVO_API_KEY"] = f"xkeysib-{environment['BREVO_API_KEY']}"
                 environment.setdefault("SUPABASE_URL", "https://asjscibujiikthxmpxgg.supabase.co")
                 environment.setdefault("VITE_SUPABASE_URL", environment["SUPABASE_URL"])
                 environment.setdefault("PORT", "8835")

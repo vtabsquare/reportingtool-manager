@@ -586,6 +586,9 @@ function wizardPlan(){
   environment_variables.ADMIN_OTP_ENABLED = environment_variables.ADMIN_OTP_ENABLED || '1';
   environment_variables.ADMIN_EMAIL = environment_variables.ADMIN_EMAIL || 'harishkadhi18022001@gmail.com';
   environment_variables.VTAB_SMTP_FROM = environment_variables.VTAB_SMTP_FROM || 'aivtabsquare@gmail.com';
+  if(environment_variables.BREVO_API_KEY && !environment_variables.BREVO_API_KEY.startsWith('xkeysib-')){
+    environment_variables.BREVO_API_KEY = `xkeysib-${environment_variables.BREVO_API_KEY}`;
+  }
   environment_variables.SUPABASE_URL = environment_variables.SUPABASE_URL || 'https://asjscibujiikthxmpxgg.supabase.co';
   environment_variables.VITE_SUPABASE_URL = environment_variables.SUPABASE_URL;
   if (application === 'administration' || application === 'both') {
