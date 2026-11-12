@@ -87,7 +87,7 @@ class TicketUpdate(BaseModel):
 
 
 class TicketDecision(BaseModel):
-    decision: Literal["approved", "blocked"]
+    decision: Literal["approved", "closed", "blocked"]
     notes: str = Field(min_length=1, max_length=4000)
 
 

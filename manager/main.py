@@ -848,8 +848,8 @@ def _map_central_ticket(row: dict[str, Any], attachments: list[dict[str, Any]] |
         manager_decision = "approved" if build_tag == "manager:approved" else ""
         display_status = "Closed"
     elif raw_status == "PENDING_ADMIN_SIGN_OFF":
-        manager_decision = "approved"
-        display_status = "Approved (Pending Admin)"
+        manager_decision = "closed"
+        display_status = "Closed (Pending Admin)"
     elif build_tag == "manager:blocked":
         manager_decision = "blocked"
         display_status = "Blocked"
@@ -1718,10 +1718,10 @@ def decide_central_ticket(ticket_id: str, payload: TicketDecision, actor: Operat
         raise HTTPException(409, "Closed tickets cannot be modified after Administrator sign-off.")
     notes = payload.notes.strip()
     if not notes:
-        raise HTTPException(422, "Notes are required when marking a ticket Blocked or Approved.")
+        raise HTTPException(422, "Notes are required when marking a ticket Blocked or Closed.")
 
     now = utc_now()
-    if payload.decision == "approved":
+    if payload.decision in ("approved", "closed"):
         new_status = "PENDING_ADMIN_SIGN_OFF"
         build_tag = "manager:approved"
         event_type = "manager_approved"
