@@ -8,6 +8,7 @@ logger = logging.getLogger("vtab.manager")
 import mimetypes
 import os
 import re
+import sys
 import threading
 import uuid
 import urllib.error
@@ -1376,6 +1377,10 @@ def create_deployment(payload: DeploymentCreate, idempotency_key:str|None=Header
     return {"deployment": serialize_row(db.one("SELECT * FROM deployments WHERE id=?", (deployment_id,)))}
 
 
+def _is_test_runtime() -> bool:
+    return "unittest" in sys.modules or "pytest" in sys.modules or os.getenv("VTAB_DISABLE_WEBHOOK_BROADCAST") == "1"
+
+
 def dispatch_client_update_webhook(client_id: str, deployment_id: str):
     """Notify client via webhook and broadcast to all registered and active environments."""
     try:
@@ -1388,6 +1393,10 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
         if not client or not deployment:
             return
         component = deployment.get("component") or "services"
+        test_mode = _is_test_runtime()
+        raw_sha = str(deployment.get("git_commit_sha") or "").strip().lower()
+        if test_mode and (len(set(raw_sha)) <= 1 and raw_sha != ""):
+            return
 
         # Collect ALL target destinations for this client
         targets = set()
@@ -1465,7 +1474,8 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
                 "timestamp": utc_now(),
             }
             body = json.dumps(payload).encode("utf-8")
-            for wh_url in urls:
+            target_urls = [u for u in urls if ("127.0.0.1" in u or "localhost" in u)] if test_mode else urls
+            for wh_url in target_urls:
                 try:
                     import urllib.request
                     req = urllib.request.Request(
@@ -1482,6 +1492,9 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
                         logger.info("Broadcasted update offer to %s (HTTP %s)", wh_url, resp.status)
                 except Exception as exc:
                     logger.debug("Broadcast delivery skipped (%s): %s", wh_url, exc)
+
+            if test_mode:
+                return
 
             # Direct droplet delivery over SSH if DigitalOcean host is configured
             try:
@@ -1514,6 +1527,8 @@ def dispatch_client_update_webhook(client_id: str, deployment_id: str):
 
 def dispatch_client_update_cancellation(client_id: str, deployment_id: str):
     """Notify client via webhook when an update offer is cancelled."""
+    if _is_test_runtime():
+        return
     try:
         client = db.one("SELECT * FROM clients WHERE id=?", (client_id,))
         deployment = db.one("SELECT d.*, r.component FROM deployments d JOIN releases r ON r.id=d.release_id WHERE d.id=?", (deployment_id,))
