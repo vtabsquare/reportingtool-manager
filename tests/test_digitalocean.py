@@ -74,9 +74,9 @@ class DigitalOceanAdapterTests(unittest.TestCase):
         )
         self.assertIn("#cloud-config", cloud_init)
         self.assertIn("component: administration", cloud_init)
-        self.assertIn("port: 8000", cloud_init)
+        self.assertIn("port: 8835", cloud_init)
         self.assertIn("server_name admin.vtabsquare.com;", cloud_init)
-        self.assertIn("proxy_pass http://127.0.0.1:8000;", cloud_init)
+        self.assertIn("proxy_pass http://127.0.0.1:8835;", cloud_init)
 
     @patch("urllib.request.urlopen")
     def test_provision_droplet_payload(self, mock_urlopen):
@@ -287,6 +287,71 @@ class DigitalOceanPreflightIntegrationTests(unittest.TestCase):
         self.assertEqual(res["deploy_type"], "ssh_direct")
         self.assertEqual(res["host"], "139.59.32.39")
         self.assertEqual(res["url"], "http://v2-reports.139.59.32.39.nip.io")
+
+    @patch("subprocess.run")
+    def test_provision_services_writes_env_before_build_and_installs_deps(self, mock_run):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "Linux 6.8.0\nup 1 day\n/dev/vda1 24G 20G 3.2G 87% /\nDocker version 27"
+        mock_proc.stderr = ""
+        mock_run.return_value = mock_proc
+
+        profile = application_profiles["services"]
+        adapter = DigitalOceanDeploymentAdapter("dop_v1_mock")
+        env = {"VITE_SUPABASE_ANON_KEY": "anon-test-key", "PORT": "8835"}
+        config = {
+            "host": "139.59.32.39",
+            "ssh_port": 22,
+            "ssh_user": "root",
+            "target_dir": "/var/www/reportingtool-webservice",
+            "domain": "reportservices.vtabsquare.com",
+            "ssl": True,
+            "approved_commit_sha": "b" * 40,
+        }
+        adapter.provision(profile, config, "https://github.com/vtabsquare/Reportingtool-webservice.git", env)
+
+        commands = [call.args[0][-1] for call in mock_run.call_args_list]
+        env_idx = next(i for i, cmd in enumerate(commands) if "base64 -d > '/var/www/reportingtool-webservice/web.env'" in cmd)
+        build_idx = next(i for i, cmd in enumerate(commands) if "npm run build:web" in cmd)
+        self.assertLess(env_idx, build_idx)
+        self.assertIn("npm ci", commands[build_idx])
+        self.assertIn("npm install", commands[build_idx])
+        self.assertEqual(env.get("PORT"), "8820")
+        self.assertGreaterEqual(len(env.get("VTAB_CREDENTIAL_ENCRYPTION_KEY", "")), 32)
+
+    @patch("time.sleep", return_value=None)
+    @patch("subprocess.run")
+    def test_execute_both_isolates_services_and_admin_targets(self, mock_run, _mock_sleep):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "Linux 6.8.0\nup 1 day\n/dev/vda1 24G 20G 3.2G 87% /\nDocker version 27"
+        mock_proc.stderr = ""
+        mock_run.return_value = mock_proc
+
+        from types import SimpleNamespace
+        plan = SimpleNamespace(
+            client_id="c1",
+            application="both",
+            provider="digitalocean",
+            provider_config={"host": "139.59.32.39", "region": "blr1", "instance_size": "s-2vcpu-4gb", "domain": "", "target_dir": ""},
+            environment_variables={"SUPABASE_URL": "https://example.supabase.co", "VITE_SUPABASE_ANON_KEY": "anon"},
+        )
+        fake_db = MagicMock()
+        fake_db.one.return_value = {"previous_version": None, "client_id": "c1"}
+        engine = DeploymentEngine(fake_db)
+        release = {"version": "1.0.0", "git_commit_sha": "c" * 40}
+
+        with patch.object(DigitalOceanDeploymentAdapter, "provision", return_value={"resource_id": "droplet-139.59.32.39", "host": "139.59.32.39", "url": "https://ok", "deploy_type": "ssh_direct"}) as mock_prov:
+            engine.execute("dep-svc", plan, "tok", "services", release, "https://github.com/vtabsquare/Reportingtool-webservice.git")
+            engine.execute("dep-adm", plan, "tok", "administration", release, "https://github.com/vtabsquare/Reporting-admin.git")
+
+        svc_call, adm_call = mock_prov.call_args_list
+        self.assertEqual(svc_call.args[1]["target_dir"], "/var/www/reportingtool-webservice")
+        self.assertEqual(svc_call.args[1]["domain"], "reportservices.vtabsquare.com")
+        self.assertEqual(svc_call.args[3]["PORT"], "8820")
+        self.assertEqual(adm_call.args[1]["target_dir"], "/var/www/reportingtool-admin")
+        self.assertEqual(adm_call.args[1]["domain"], "admin-reporting.vtabsquare.com")
+        self.assertEqual(adm_call.args[3]["PORT"], "8835")
 
     @patch("subprocess.run")
     def test_operator_test_connection_endpoint(self, mock_run):

@@ -66,7 +66,7 @@ async function loadAll(){
       api('/api/v1/operator/summary'),api('/api/v1/operator/clients'),api('/api/v1/operator/releases'),api('/api/v1/operator/deployments'),api('/api/v1/operator/tickets'),api('/api/v1/operator/audit?limit=250'),api('/api/v1/operator/settings')
     ]);
     Object.assign(state,{summary,clients:clients.clients,releases:releases.releases,deployments:deployments.deployments,tickets:tickets.tickets,audit:audit.events,settings:managerSettings});
-    $('ticketCount').textContent=state.tickets.filter(ticket=>ticket.status!=='closed').length;
+    $('ticketCount').textContent=state.tickets.filter(ticket=>!['closed','deployed'].includes(String(ticket.status||'').toLowerCase())).length;
     render();
     if(state.settings.github?.configured)loadGitHubReleases(false);
   }catch(error){notify(error.message,true);if(/operator key/i.test(error.message))localStorage.removeItem('vtab_manager_key');throw error}
@@ -185,8 +185,8 @@ function renderClients(){const actions=`<div class="row-actions"><div class="vie
 function clientActions(row){return `<div class="row-actions client-controls">${action('neutral','settings','Settings','data-configure-client',row.id,'Edit client settings')}${action('reject','trash-2','Delete','data-delete-client',row.id,'Delete client and associated configuration')}</div>`}
 function clientTable(rows){if(!rows.length)return empty('No client environments registered.',`<button class="text-action" data-open-deployment>Register one in a deployment</button>`);if(state.clientView==='table')return `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Environment</th><th>Database</th><th>Health</th><th>Services</th><th>Admin</th><th></th></tr></thead><tbody>${rows.map(row=>`<tr><td><div class="client-name"><span class="client-logo">${esc(row.name[0])}</span><div><strong>${esc(row.name)}</strong><small>${esc(row.code)}</small></div></div></td><td>${badge(row.environment)}</td><td>${esc(row.database_provider)}</td><td><span class="health ${esc(row.last_health_status)}"><i></i>${esc(row.last_health_status)}</span></td><td>${esc(row.installed_services_version||'Not reported')}</td><td>${esc(row.installed_admin_version||'Not reported')}</td><td>${clientActions(row)}</td></tr>`).join('')}</tbody></table></div>`;return `<div class="client-card-grid">${rows.map(row=>`<article class="client-card"><div class="client-card-top"><span class="client-logo large">${esc(row.name[0])}</span><div><h3>${esc(row.name)}</h3><p>${esc(row.code)}</p></div>${badge(row.environment)}</div><div class="client-health"><span class="health ${esc(row.last_health_status)}"><i></i>${esc(row.last_health_status)}</span><small>${esc(row.database_provider)}</small></div><dl><div><dt>Reporting Services</dt><dd>${esc(row.installed_services_version||'Not reported')}</dd></div><div><dt>Administration</dt><dd>${esc(row.installed_admin_version||'Not reported')}</dd></div></dl>${clientActions(row)}</article>`).join('')}</div>`}
 
-function renderTickets(){return `${viewTitle('Support ticket manager','Only issues approved by a client administrator are synchronized here')}${panel('Escalated tickets','Sanitized diagnostics and delivery lifecycle',ticketTable(state.tickets,false))}`}
-function ticketTable(rows,compact){if(!rows.length)return empty('No client-approved tickets.');return `<div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Client</th><th>Issue</th><th>Severity</th><th>Status</th>${compact?'':'<th>Approved by</th><th>Update</th>'}</tr></thead><tbody>${rows.map(row=>`<tr><td><strong>${esc(row.external_number)}</strong><small>${stamp(row.created_at)}</small></td><td>${esc(row.client_name)}</td><td><strong>${esc(row.title)}</strong><small>${esc(row.component)}</small></td><td>${badge(row.severity)}</td><td>${badge(row.status)}</td>${compact?'':`<td>${esc(row.approved_by)}</td><td><select class="ticket-status compact-select" data-ticket="${row.id}">${['escalated','triaged','in_progress','fix_available','deployed','closed'].map(value=>`<option ${row.status===value?'selected':''}>${value}</option>`).join('')}</select></td>`}</tr>`).join('')}</tbody></table></div>`}
+function renderTickets(){return `${viewTitle('Support tickets','Review issues, mark Blocked or Approved with notes, and track Administrator closure')}${panel('All tickets','Live tickets fetched from Supabase',ticketTable(state.tickets,false),'','<button class="secondary view-action" onclick="openTicketCenter()">Open Ticket Center</button>')}`}
+function ticketTable(rows,compact){if(!rows.length)return empty('No tickets found.');return `<div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Client / App</th><th>Issue & Notes</th><th>Severity</th><th>Status</th>${compact?'':'<th>Reporter / Approved by</th><th>Manage</th>'}</tr></thead><tbody>${rows.map(row=>{const statusText=row.display_status||row.status;const notesParts=[];if(row.manager_notes)notesParts.push(`Manager: ${row.manager_notes}`);if(row.admin_notes)notesParts.push(`Admin: ${row.admin_notes}`);const isClosed=String(row.status||'').toUpperCase()==='CLOSED';return `<tr><td><strong>${esc(row.external_number)}</strong><small>${stamp(row.created_at)}</small></td><td>${esc(row.client_name)}</td><td><strong>${esc(row.title)}</strong><small>${esc(row.component)}${row.summary?` — ${esc(row.summary.slice(0,90))}`:''}</small>${notesParts.length?`<small style="display:block;margin-top:4px;color:var(--accent,#38bdf8)">${esc(notesParts.join(' · '))}</small>`:''}</td><td>${badge(row.severity)}</td><td>${badge(statusText)}</td>${compact?'':`<td>${esc(row.approved_by)}</td><td>${row.source_type==='ticket_center'?(isClosed?`<span class="muted">Closed by Admin</span>`:`<div class="row-actions"><button class="primary" type="button" data-ticket-decision="approved" data-ticket-id="${esc(row.id)}">Approved</button><button class="secondary" type="button" data-ticket-decision="blocked" data-ticket-id="${esc(row.id)}">Blocked</button></div>`):`<select class="ticket-status compact-select" data-ticket="${row.id}">${['escalated','triaged','in_progress','fix_available','deployed','closed'].map(value=>`<option ${row.status===value?'selected':''}>${value}</option>`).join('')}</select>`}</td>`}</tr>`}).join('')}</tbody></table></div>`}
 
 function renderSettings(){
   const theme=document.documentElement.dataset.theme;const github=state.settings.github||{};const repositories=state.settings.repositories||{};const server=state.settings.server||{};const supabase=state.settings.storageBackend==='supabase-postgresql';
@@ -223,6 +223,7 @@ function bindActions(){
   document.querySelectorAll('[data-reject-deployment]').forEach(button=>button.onclick=()=>rejectDeployment(button.dataset.rejectDeployment));
   const insertEnvBtn=$('insertConnectorVars');if(insertEnvBtn)insertEnvBtn.onclick=insertConnectorVariables;
   document.querySelectorAll('.ticket-status').forEach(select=>select.onchange=()=>updateTicket(select.dataset.ticket,select.value));
+  document.querySelectorAll('[data-ticket-decision]').forEach(button=>button.onclick=()=>openTicketDecision(button.dataset.ticketId,button.dataset.ticketDecision));
   document.querySelectorAll('[data-theme-choice]').forEach(button=>button.onclick=()=>applyTheme(button.dataset.themeChoice));
   document.querySelectorAll('[data-close-dialog]').forEach(button=>button.onclick=()=>button.closest('dialog').close());
   document.querySelectorAll('[data-go-settings]').forEach(button=>button.onclick=()=>setView('settings'));
@@ -591,19 +592,21 @@ function wizardPlan(){
   }
   environment_variables.SUPABASE_URL = environment_variables.SUPABASE_URL || 'https://asjscibujiikthxmpxgg.supabase.co';
   environment_variables.VITE_SUPABASE_URL = environment_variables.SUPABASE_URL;
-  if (application === 'administration' || application === 'both') {
+  if (application === 'administration') {
     environment_variables.PORT = '8835';
+  }
+  if (application === 'administration' || application === 'both') {
     environment_variables.SERVICES_API_URL = environment_variables.SERVICES_API_URL || 'https://reportservices.vtabsquare.com/api/v1';
-    environment_variables.VTAB_ADMIN_URL = environment_variables.VTAB_ADMIN_URL || (data.domain ? `https://${data.domain}` : 'https://admin-reporting.vtabsquare.com');
+    environment_variables.VTAB_ADMIN_URL = environment_variables.VTAB_ADMIN_URL || (application === 'administration' && data.domain ? `https://${data.domain}` : 'https://admin-reporting.vtabsquare.com');
   }
   const release_ids={};if(application!=='administration'&&data.services_release)release_ids.services=data.services_release;if(application!=='services'&&data.administration_release)release_ids.administration=data.administration_release;
   const cleanVal=v=>typeof v==='string'?v.replace(/^[`'"\s]+|[`'"\s]+$/g,''):v;
-  const targetDir=cleanVal(data.target_dir)||(application==='administration'?'/var/www/reportingtool-admin':'/var/www/reportingtool-webservice');
-  const domain=cleanVal(data.domain)||(application==='administration'?'admin-reporting.vtabsquare.com':'reportservices.vtabsquare.com');
+  const targetDir=cleanVal(data.target_dir)||(application==='both'?'':(application==='administration'?'/var/www/reportingtool-admin':'/var/www/reportingtool-webservice'));
+  const domain=cleanVal(data.domain)||(application==='both'?'':(application==='administration'?'admin-reporting.vtabsquare.com':'reportservices.vtabsquare.com'));
   const host=cleanVal(data.host)||state.settings?.server?.host||'139.59.32.39';
   const sshUser=cleanVal(data.ssh_user)||state.settings?.server?.ssh_user||'root';
   const sshPort=Number(cleanVal(data.ssh_port)||state.settings?.server?.ssh_port||22);
-  return {client_id:clientId,application,provider:data.provider||'digitalocean',release_ids,repositories:{services:repositories.services_repository||'',administration:repositories.admin_repository||''},provider_config:{service_name:cleanVal(data.service_name)||(application==='administration'?'reportingtool-admin':'vtab-reporting-v2'),region:data.region||'blr1',instance_size:data.instance_size||'s-2vcpu-4gb',owner_id:data.owner_id||'',service_id:data.service_id||'',branch:data.branch||'main',image:data.image||'ubuntu-24-04-x64',domain:domain,ssl:Boolean(domain&&domain.trim()),host:host,ssh_user:sshUser,ssh_port:sshPort,target_dir:targetDir},environment_variables};
+  return {client_id:clientId,application,provider:data.provider||'digitalocean',release_ids,repositories:{services:repositories.services_repository||'',administration:repositories.admin_repository||''},provider_config:{service_name:cleanVal(data.service_name)||(application==='administration'?'reportingtool-admin':'vtab-reporting-v2'),region:data.region||'blr1',instance_size:data.instance_size||'s-2vcpu-4gb',owner_id:data.owner_id||'',service_id:data.service_id||'',branch:data.branch||'main',image:data.image||'ubuntu-24-04-x64',domain:domain,ssl:application==='both'?true:Boolean(domain&&domain.trim()),host:host,ssh_user:sshUser,ssh_port:sshPort,target_dir:targetDir},environment_variables};
 }
 function renderPreflight(result){
   const checks=result.checks||[];const passed=checks.filter(check=>check.status==='passed').length;const score=checks.length?Math.round(passed/checks.length*100):0;
@@ -621,6 +624,18 @@ async function wizardContinue(){
 async function publishRelease(id){try{await api(`/api/v1/operator/releases/${id}/publish`,{method:'POST'});notify('Release published and ready for deployment.');await loadAll()}catch(error){notify(error.message,true)}}
 async function approveDeployment(id){const approved_by=prompt('Client administrator who approved this deployment:');if(!approved_by)return;try{await api(`/api/v1/operator/deployments/${id}/approve`,{method:'POST',body:JSON.stringify({approved_by})});notify('Deployment approved and available to the connector.');await loadAll()}catch(error){notify(error.message,true)}}
 async function updateTicket(id,status){try{await api(`/api/v1/operator/tickets/${id}`,{method:'PATCH',body:JSON.stringify({status})});notify('Ticket status updated.');await loadAll()}catch(error){notify(error.message,true)}}
+function openTicketDecision(id,decision){
+  const ticket=(state.tickets||[]).find(row=>row.id===id);
+  if(!ticket)return;
+  $('ticketDecisionId').value=id;
+  $('ticketDecisionSelect').value=decision==='blocked'?'blocked':'approved';
+  $('ticketDecisionMeta').textContent=`TICKET ${ticket.external_number||''} · ${ticket.component||''}`.toUpperCase();
+  $('ticketDecisionTitle').textContent=ticket.title||'Manage ticket';
+  $('ticketDecisionSummary').textContent=ticket.summary||'';
+  $('ticketDecisionNotes').value=ticket.manager_notes||'';
+  openDialog('ticketDecisionDialog');
+}
+async function openTicketCenter(){try{const result=await api('/api/v1/operator/ticket-center/link',{method:'POST'});window.open(result.url,'_blank','noopener,noreferrer')}catch(error){notify(error.message,true)}}
 function formData(form){return Object.fromEntries([...new FormData(form).entries()].map(([k,v])=>[k,typeof v==='string'?v.replace(/^[`'"\s]+|[`'"\s]+$/g,''):v]).filter(([,value])=>value!==''))}
 function wireForm(id,handler){
   const form=$(id);
@@ -643,6 +658,7 @@ function wireForm(id,handler){
   })
 }
 wireForm('clientForm',async data=>{const result=await api('/api/v1/operator/clients',{method:'POST',body:JSON.stringify(data)});$('bootstrapToken').textContent=`Connector token:\n${result.connectorBootstrapToken}\n\nClient administrator token:\n${result.clientAdminBootstrapToken}`;setTimeout(()=>$('tokenDialog').showModal(),100);notify('Client environment registered.')});
+wireForm('ticketDecisionForm',async data=>{await api(`/api/v1/operator/tickets/${data.ticket_id}/decision`,{method:'POST',body:JSON.stringify({decision:data.decision,notes:data.notes})});notify(`Ticket marked as ${data.decision}.`)});
 wireForm('releaseForm',async data=>{data.manifest={schema:'vtab-release-manifest',version:1};await api('/api/v1/operator/releases',{method:'POST',body:JSON.stringify(data)});notify('Release draft created.')});
 wireForm('offerForm',async data=>{
   const releaseId=data.release_id;

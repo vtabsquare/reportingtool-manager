@@ -86,6 +86,11 @@ class TicketUpdate(BaseModel):
     status: Literal["escalated", "triaged", "in_progress", "fix_available", "deployed", "closed"]
 
 
+class TicketDecision(BaseModel):
+    decision: Literal["approved", "blocked"]
+    notes: str = Field(min_length=1, max_length=4000)
+
+
 class GitHubSettingsUpdate(BaseModel):
     repository: HttpUrl
 

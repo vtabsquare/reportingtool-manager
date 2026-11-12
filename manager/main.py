@@ -40,6 +40,7 @@ from .contracts import (
     ReleaseValidation,
     ReleaseVersionUpdate,
     DeploymentRetry,
+    TicketDecision,
     TicketEscalation,
     TicketUpdate,
     WizardExecuteRequest,
@@ -78,6 +79,33 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+def _central_ticket_link(identity: OperatorIdentity) -> dict[str, Any]:
+    if not settings.ticket_integration_key:
+        raise HTTPException(503, "VTAB Ticket Center integration is not configured.")
+    payload = {
+        "user_id": identity.actor,
+        "email": identity.actor if "@" in identity.actor else f"{identity.actor}@vtab.local",
+        "role": "developer",
+        "app_version": __version__,
+        "os_info": {},
+        "workspace_id": "vtab-control-plane",
+        "source": "reporting-manager",
+    }
+    request = urllib.request.Request(settings.ticket_center_url + "/api/integrations/link", data=json.dumps(payload).encode("utf-8"), method="POST", headers={"Content-Type": "application/json", "X-VTAB-Integration-Key": settings.ticket_integration_key})
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise HTTPException(error.code, f"Ticket Center rejected the handoff: {detail}") from error
+    except Exception as error:
+        raise HTTPException(502, "VTAB Ticket Center is currently unavailable.") from error
+
+@app.post("/api/v1/operator/ticket-center/link")
+def operator_ticket_center_link(identity: OperatorIdentity = Depends(require_operator)):
+    authorize(identity, {"operator", "super_admin"})
+    return _central_ticket_link(identity)
 
 
 @app.middleware("http")
@@ -706,6 +734,89 @@ def finalize_healthy_deployment_if_ready(deployment: Any) -> Any:
 
     return deployment
 
+def _central_tickets_table_exists() -> bool:
+    try:
+        if db.backend == "supabase-postgresql":
+            row = db.one("SELECT to_regclass('public.tickets') IS NOT NULL AS ready")
+            return bool(row and row.get("ready"))
+        row = db.one("SELECT name FROM sqlite_master WHERE type='table' AND name='tickets'")
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _iso_str(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _map_central_ticket(row: dict[str, Any]) -> dict[str, Any]:
+    raw_status = str(row.get("status") or "NEW").upper()
+    build_tag = str(row.get("fixed_in_build") or "").strip().lower()
+    if raw_status == "CLOSED":
+        manager_decision = "approved" if build_tag == "manager:approved" else ""
+        display_status = "Closed"
+    elif raw_status == "PENDING_ADMIN_SIGN_OFF":
+        manager_decision = "approved"
+        display_status = "Approved (Pending Admin)"
+    elif build_tag == "manager:blocked":
+        manager_decision = "blocked"
+        display_status = "Blocked"
+    elif raw_status == "REOPENED":
+        manager_decision = ""
+        display_status = "Reopened"
+    else:
+        manager_decision = ""
+        display_status = raw_status
+    return {
+        "id": str(row["id"]),
+        "external_number": f"#{row.get('ticket_number') or ''}",
+        "title": row.get("title") or "",
+        "summary": row.get("description") or "",
+        "severity": row.get("severity") or "medium",
+        "component": row.get("source") or row.get("category") or "ticket-center",
+        "status": raw_status,
+        "display_status": display_status,
+        "manager_decision": manager_decision,
+        "manager_notes": row.get("dev_resolution_notes") or "",
+        "manager_updated_at": _iso_str(row.get("dev_resolved_at")),
+        "admin_notes": row.get("admin_feedback_notes") or "",
+        "admin_reviewed_by": row.get("admin_reviewed_by") or "",
+        "admin_closed_at": _iso_str(row.get("admin_closed_at")),
+        "user_experience_verified": bool(row.get("user_experience_verified")),
+        "submitted_by_role": "user",
+        "approved_by": row.get("reporter_email") or "",
+        "client_name": row.get("workspace_id") or row.get("source") or "Ticket Center",
+        "assigned_dev_id": row.get("assigned_dev_id"),
+        "created_at": _iso_str(row.get("created_at")),
+        "updated_at": _iso_str(row.get("updated_at")),
+        "source_type": "ticket_center",
+    }
+
+
+def _central_ticket_rows(status: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+    if not _central_tickets_table_exists():
+        return []
+    query = (
+        "SELECT id, ticket_number, title, description, category, severity, status, source, "
+        "workspace_id, reporter_email, assigned_dev_id, fixed_in_build, dev_resolution_notes, "
+        "dev_resolved_at, admin_reviewed_by, admin_closed_at, admin_feedback_notes, "
+        "user_experience_verified, created_at, updated_at FROM tickets"
+    )
+    params: list[Any] = []
+    if status:
+        query += " WHERE lower(status)=lower(?)"
+        params.append(status)
+    query += " ORDER BY created_at DESC"
+    if limit is not None:
+        query += f" LIMIT {int(limit)}"
+    rows = db.all(query, tuple(params))
+    return [_map_central_ticket(row) for row in rows]
+
+
 @app.get("/api/v1/operator/summary")
 def summary(_: str = Depends(require_operator)):
     counts = {}
@@ -717,13 +828,22 @@ def summary(_: str = Depends(require_operator)):
     }
     for key, query in queries.items():
         counts[key] = (db.one(query) or {"total": 0})["total"]
+    if _central_tickets_table_exists():
+        central_open = (db.one("SELECT COUNT(*) total FROM tickets WHERE status <> 'CLOSED'") or {"total": 0})["total"]
+        counts["open_tickets"] = int(counts["open_tickets"]) + int(central_open)
     recent = [finalize_healthy_deployment_if_ready(r) for r in db.all(
         "SELECT d.*,c.name client_name,r.component,r.git_commit_sha,r.repository_url FROM deployments d JOIN clients c ON c.id=d.client_id JOIN releases r ON r.id=d.release_id ORDER BY d.created_at DESC LIMIT 8"
     )]
     counts["recent_deployments"] = [serialize_row(r) for r in recent]
-    counts["recent_tickets"] = [serialize_row(r) for r in db.all(
+    support_recent = [serialize_row(r) for r in db.all(
         "SELECT t.*,c.name client_name FROM support_tickets t JOIN clients c ON c.id=t.client_id ORDER BY t.created_at DESC LIMIT 8"
     )]
+    combined_recent = sorted(
+        _central_ticket_rows(limit=8) + support_recent,
+        key=lambda item: str(item.get("created_at") or ""),
+        reverse=True,
+    )[:8]
+    counts["recent_tickets"] = combined_recent
     return counts
 
 
@@ -1457,10 +1577,17 @@ def list_tickets(status: str | None = Query(default=None), _: str = Depends(requ
     query = "SELECT t.*,c.name client_name FROM support_tickets t JOIN clients c ON c.id=t.client_id"
     params: tuple[Any, ...] = ()
     if status:
-        query += " WHERE t.status=?"
+        query += " WHERE lower(t.status)=lower(?)"
         params = (status,)
     query += " ORDER BY t.created_at DESC"
-    return {"tickets": [serialize_row(r) for r in db.all(query, params)]}
+    support_rows = [serialize_row(r) for r in db.all(query, params)]
+    central_rows = _central_ticket_rows(status=status)
+    combined = sorted(
+        central_rows + support_rows,
+        key=lambda item: str(item.get("created_at") or ""),
+        reverse=True,
+    )
+    return {"tickets": combined}
 
 
 @app.patch("/api/v1/operator/tickets/{ticket_id}")
@@ -1472,6 +1599,53 @@ def update_ticket(ticket_id: str, payload: TicketUpdate, actor: OperatorIdentity
     db.execute("UPDATE support_tickets SET status=?,updated_at=? WHERE id=?", (payload.status, utc_now(), ticket_id))
     db.audit(actor, "ticket.status_changed", "ticket", ticket_id, ticket["client_id"], {"status": payload.status})
     return {"ticket": serialize_row(db.one("SELECT * FROM support_tickets WHERE id=?", (ticket_id,)))}
+
+
+@app.post("/api/v1/operator/tickets/{ticket_id}/decision")
+def decide_central_ticket(ticket_id: str, payload: TicketDecision, actor: OperatorIdentity = Depends(require_operator)):
+    authorize(actor, {"super_admin", "operator", "support"})
+    if not _central_tickets_table_exists():
+        raise HTTPException(404, "Central tickets table is not available.")
+    ticket = db.one("SELECT * FROM tickets WHERE id=?", (ticket_id,))
+    if not ticket:
+        raise HTTPException(404, "Ticket not found.")
+    current_status = str(ticket.get("status") or "NEW").upper()
+    if current_status == "CLOSED":
+        raise HTTPException(409, "Closed tickets cannot be modified after Administrator sign-off.")
+    notes = payload.notes.strip()
+    if not notes:
+        raise HTTPException(422, "Notes are required when marking a ticket Blocked or Approved.")
+
+    now = utc_now()
+    if payload.decision == "approved":
+        new_status = "PENDING_ADMIN_SIGN_OFF"
+        build_tag = "manager:approved"
+        event_type = "manager_approved"
+        db.execute(
+            """UPDATE tickets
+               SET status=?, fixed_in_build=?, dev_resolution_notes=?, dev_resolved_at=?, assigned_dev_id=?, updated_at=?
+               WHERE id=?""",
+            (new_status, build_tag, notes, now, str(actor), now, ticket_id),
+        )
+    else:
+        new_status = "IN_PROGRESS"
+        build_tag = "manager:blocked"
+        event_type = "manager_blocked"
+        db.execute(
+            """UPDATE tickets
+               SET status=?, fixed_in_build=?, dev_resolution_notes=?, assigned_dev_id=?, updated_at=?
+               WHERE id=?""",
+            (new_status, build_tag, notes, str(actor), now, ticket_id),
+        )
+
+    db.execute(
+        """INSERT INTO ticket_timeline(id, ticket_id, actor_id, actor_role, event_type, old_status, new_status, notes, created_at)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (identifier(), ticket_id, str(actor), "developer", event_type, current_status, new_status, notes, now),
+    )
+    db.audit(str(actor), f"ticket.{payload.decision}", "ticket", ticket_id, details={"decision": payload.decision, "notes": notes, "status": new_status})
+    updated = db.one("SELECT * FROM tickets WHERE id=?", (ticket_id,))
+    return {"ticket": _map_central_ticket(updated)}
 
 
 @app.get("/api/v1/operator/audit")
@@ -1537,12 +1711,18 @@ def wizard_preflight(payload: WizardPreflightRequest, actor: OperatorIdentity = 
     payload.environment_variables.setdefault("VITE_SUPABASE_URL", payload.environment_variables["SUPABASE_URL"])
     domain = str(payload.provider_config.get("domain") or "").strip()
     ssl = bool(payload.provider_config.get("ssl", False))
-    resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
+    if payload.application == "both":
+        resolved_web_url = "https://reportservices.vtabsquare.com"
+        resolved_admin_url = "https://admin-reporting.vtabsquare.com"
+    else:
+        resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
+        resolved_admin_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://admin-reporting.vtabsquare.com")
     payload.environment_variables.setdefault("VTAB_WEB_URL", resolved_web_url)
-    resolved_admin_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "http://admin-reporting.vtabsquare.com")
-    payload.environment_variables.setdefault("VTAB_ADMIN_URL", resolved_admin_url)
-    payload.environment_variables.setdefault("PORT", "8835")
-    payload.environment_variables.setdefault("SERVICES_API_URL", "https://reportservices.vtabsquare.com/api/v1")
+    if payload.application in ("administration", "both"):
+        payload.environment_variables.setdefault("VTAB_ADMIN_URL", resolved_admin_url)
+        payload.environment_variables.setdefault("SERVICES_API_URL", "https://reportservices.vtabsquare.com/api/v1")
+    if payload.application == "administration":
+        payload.environment_variables.setdefault("PORT", "8835")
     if payload.provider == "digitalocean":
         for render_k in ("RENDER_SERVICE_ID", "VTAB_RENDER_SERVICE_ID", "RENDER_API_KEY", "RENDER_TOKEN", "RENDER_API_TOKEN"):
             payload.environment_variables.pop(render_k, None)
@@ -1578,12 +1758,18 @@ def wizard_execute(payload: WizardExecuteRequest, background_tasks: BackgroundTa
     payload.environment_variables.setdefault("VITE_SUPABASE_URL", payload.environment_variables["SUPABASE_URL"])
     domain = str(payload.provider_config.get("domain") or "").strip()
     ssl = bool(payload.provider_config.get("ssl", False))
-    resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
+    if payload.application == "both":
+        resolved_web_url = "https://reportservices.vtabsquare.com"
+        resolved_admin_url = "https://admin-reporting.vtabsquare.com"
+    else:
+        resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
+        resolved_admin_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://admin-reporting.vtabsquare.com")
     payload.environment_variables.setdefault("VTAB_WEB_URL", resolved_web_url)
-    resolved_admin_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "http://admin-reporting.vtabsquare.com")
-    payload.environment_variables.setdefault("VTAB_ADMIN_URL", resolved_admin_url)
-    payload.environment_variables.setdefault("PORT", "8835")
-    payload.environment_variables.setdefault("SERVICES_API_URL", "https://reportservices.vtabsquare.com/api/v1")
+    if payload.application in ("administration", "both"):
+        payload.environment_variables.setdefault("VTAB_ADMIN_URL", resolved_admin_url)
+        payload.environment_variables.setdefault("SERVICES_API_URL", "https://reportservices.vtabsquare.com/api/v1")
+    if payload.application == "administration":
+        payload.environment_variables.setdefault("PORT", "8835")
     if payload.provider == "digitalocean":
         for render_k in ("RENDER_SERVICE_ID", "VTAB_RENDER_SERVICE_ID", "RENDER_API_KEY", "RENDER_TOKEN", "RENDER_API_TOKEN"):
             payload.environment_variables.pop(render_k, None)

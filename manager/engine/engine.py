@@ -104,8 +104,28 @@ class DeploymentEngine:
         self.log(deployment_id, EXECUTION_STAGES[0], "info", "Deployment engine accepted the confirmed plan.")
         try:
             self.db.execute("UPDATE deployments SET status='deploying',stage=?,progress_percent=?,updated_at=? WHERE id=?", (EXECUTION_STAGES[1], 15, self.now(), deployment_id))
-            provider_config={**plan.provider_config,"approved_commit_sha":release.get("git_commit_sha")}
-            resource = adapter.provision(profile, provider_config, repository, plan.environment_variables)
+            provider_config = {**plan.provider_config, "approved_commit_sha": release.get("git_commit_sha")}
+            component_env = dict(plan.environment_variables)
+            if plan.application == "both":
+                if component == "services":
+                    if not provider_config.get("target_dir") or provider_config.get("target_dir") == "/var/www/reportingtool-admin":
+                        provider_config["target_dir"] = "/var/www/reportingtool-webservice"
+                    if not provider_config.get("domain") or provider_config.get("domain") == "admin-reporting.vtabsquare.com":
+                        provider_config["domain"] = "reportservices.vtabsquare.com"
+                        provider_config["ssl"] = True
+                    if not provider_config.get("service_name") or provider_config.get("service_name") == "reportingtool-admin":
+                        provider_config["service_name"] = "vtab-reporting-v2"
+                    component_env["PORT"] = str(profile.port)
+                else:
+                    if not provider_config.get("target_dir") or provider_config.get("target_dir") == "/var/www/reportingtool-webservice":
+                        provider_config["target_dir"] = "/var/www/reportingtool-admin"
+                    if not provider_config.get("domain") or provider_config.get("domain") == "reportservices.vtabsquare.com":
+                        provider_config["domain"] = "admin-reporting.vtabsquare.com"
+                        provider_config["ssl"] = True
+                    if not provider_config.get("service_name") or provider_config.get("service_name") == "vtab-reporting-v2":
+                        provider_config["service_name"] = "reportingtool-admin"
+                    component_env["PORT"] = str(profile.port)
+            resource = adapter.provision(profile, provider_config, repository, component_env)
             if plan.provider=="render":
                 exact=adapter.deploy_exact(str(resource.get("resource_id") or ""),str(release.get("git_commit_sha") or ""))
                 resource={**resource,**exact}
@@ -114,9 +134,9 @@ class DeploymentEngine:
             self.db.execute(
                 """INSERT INTO client_infrastructure(id,client_id,provider,component,provider_resource_id,region,instance_size,domain,ip_address,credentials_ref,config_json,environment_variables_json,config_version,sync_status,config_updated_at,config_updated_by,status,created_at,updated_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (infrastructure_id, plan.client_id, plan.provider, component, resource.get("resource_id"), plan.provider_config.get("region"), plan.provider_config.get("instance_size"), plan.provider_config.get("domain"), None, "provider-vault", json.dumps(provider_config), encrypt_environment(plan.environment_variables), 1, "provider_pending", self.now(), "deployment-engine", "provisioning", self.now(), self.now()),
+                (infrastructure_id, plan.client_id, plan.provider, component, resource.get("resource_id"), provider_config.get("region"), provider_config.get("instance_size"), provider_config.get("domain"), None, "provider-vault", json.dumps(provider_config), encrypt_environment(component_env), 1, "provider_pending", self.now(), "deployment-engine", "provisioning", self.now(), self.now()),
             )
-            self.db.execute("INSERT INTO client_configuration_versions(infrastructure_id,client_id,version,config_json,environment_variables_json,sync_status,changed_by,change_summary,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(infrastructure_id,plan.client_id,1,json.dumps(provider_config),encrypt_environment(plan.environment_variables),"provider_pending","deployment-engine","Initial deployment configuration",self.now()))
+            self.db.execute("INSERT INTO client_configuration_versions(infrastructure_id,client_id,version,config_json,environment_variables_json,sync_status,changed_by,change_summary,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(infrastructure_id,plan.client_id,1,json.dumps(provider_config),encrypt_environment(component_env),"provider_pending","deployment-engine","Initial deployment configuration",self.now()))
             if resource.get("provider_deploy_id"):
                 self.db.execute("UPDATE deployments SET provider_deploy_id=? WHERE id=?",(resource["provider_deploy_id"],deployment_id))
             for index, stage in enumerate(EXECUTION_STAGES[2:8], start=2):
@@ -136,7 +156,7 @@ class DeploymentEngine:
                         host = resource.get("host")
                         ssh_user = provider_config.get("ssh_user") or "root"
                         ssh_port = int(provider_config.get("ssh_port") or 22)
-                        key_data = provider_config.get("ssh_key_data")
+                        key_data = provider_config.get("ssh_key") or provider_config.get("ssh_key_data")
                         port = profile.port
                         ssh_code, ssh_out, _ = DigitalOceanDeploymentAdapter.run_ssh_command(
                             host, ssh_port, ssh_user,

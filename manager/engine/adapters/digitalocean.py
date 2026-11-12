@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import secrets
 import subprocess
 from typing import Any
 
@@ -187,15 +188,8 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                 git_cmd = f"cd '{target_dir}' && if [ -d .git ]; then git fetch origin 2>&1 && git reset --hard {commit_sha} 2>&1; fi"
                 self.run_ssh_command(host, port, user, git_cmd, key_data=key_data, timeout=30)
 
-            # Rebuild frontend web distribution if source package exists
-            if profile.key == "services":
-                build_cmd = f"if [ -f '{target_dir}/package.json' ]; then cd '{target_dir}' && npm run build:web 2>&1 && chown -R www-data:www-data '{target_dir}/dist-web' 2>/dev/null || true; fi"
-                self.run_ssh_command(host, port, user, build_cmd, key_data=key_data, timeout=120)
-            elif profile.key == "administration":
-                build_cmd = f"if [ -f '{target_dir}/package.json' ]; then cd '{target_dir}' && (npm ci 2>&1 || npm install 2>&1) && npm run build 2>&1 && chown -R www-data:www-data '{target_dir}/dist' 2>/dev/null || true; fi"
-                self.run_ssh_command(host, port, user, build_cmd, key_data=key_data, timeout=120)
-
-            # Atomic environment configuration (strip any accidental markdown backticks or quotes)
+            # Atomic environment configuration BEFORE frontend build so Vite/build-frontend.mjs
+            # reads up-to-date VITE_* values from web.env on clean deployments.
             backend_dir = f"{target_dir}/backend" if profile.key == "administration" else target_dir
             self.run_ssh_command(host, port, user, f"mkdir -p '{backend_dir}'", key_data=key_data)
             env_file = f"{target_dir}/web.env" if profile.key == "services" else f"{backend_dir}/.env"
@@ -226,6 +220,11 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
                 environment.setdefault("VITE_SUPABASE_URL", environment["SUPABASE_URL"])
                 resolved_web_url = f"https://{domain}" if (ssl and domain) else (f"http://{domain}" if domain else "https://reportservices.vtabsquare.com")
                 environment.setdefault("VTAB_WEB_URL", resolved_web_url)
+                environment.setdefault("VTAB_ALLOWED_ORIGINS", resolved_web_url)
+                if str(environment.get("PORT") or "") in ("", "8835"):
+                    environment["PORT"] = str(profile.port)
+                if len(str(environment.get("VTAB_CREDENTIAL_ENCRYPTION_KEY") or "").strip()) < 32:
+                    environment["VTAB_CREDENTIAL_ENCRYPTION_KEY"] = secrets.token_hex(32)
                 if commit_sha:
                     environment["VTAB_RELEASE_COMMIT_SHA"] = commit_sha[:8]
                 rel_ver = str(config.get("version") or config.get("target_version") or "").replace("commit-", "")
@@ -267,6 +266,18 @@ class DigitalOceanDeploymentAdapter(DeploymentAdapter):
             b64_env = base64.b64encode(env_content.encode("utf-8")).decode("ascii")
             write_cmd = f"echo '{b64_env}' | base64 -d > '{env_file}' && chmod 600 '{env_file}'"
             self.run_ssh_command(host, port, user, write_cmd, key_data=key_data)
+
+            # Install Node dependencies and rebuild frontend web distribution after env file is in place
+            if profile.key == "services":
+                build_cmd = f"if [ -f '{target_dir}/package.json' ]; then cd '{target_dir}' && (npm ci 2>&1 || npm install 2>&1) && npm run build:web 2>&1 && chown -R www-data:www-data '{target_dir}/dist-web' 2>/dev/null || true; fi"
+                b_code, b_out, b_err = self.run_ssh_command(host, port, user, build_cmd, key_data=key_data, timeout=240)
+                if b_code != 0:
+                    raise RuntimeError(f"Failed to build Services frontend: {b_err or b_out}")
+            elif profile.key == "administration":
+                build_cmd = f"if [ -f '{target_dir}/package.json' ]; then cd '{target_dir}' && (npm ci 2>&1 || npm install 2>&1) && npm run build 2>&1 && chown -R www-data:www-data '{target_dir}/dist' 2>/dev/null || true; fi"
+                b_code, b_out, b_err = self.run_ssh_command(host, port, user, build_cmd, key_data=key_data, timeout=240)
+                if b_code != 0:
+                    raise RuntimeError(f"Failed to build Admin Console frontend: {b_err or b_out}")
 
             # Target service lifecycle and Nginx routing
             if profile.key == "services":
