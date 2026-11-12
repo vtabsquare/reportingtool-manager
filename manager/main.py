@@ -5,10 +5,13 @@ import hmac
 import json
 import logging
 logger = logging.getLogger("vtab.manager")
+import mimetypes
 import os
+import re
 import threading
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -17,7 +20,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
@@ -745,6 +748,90 @@ def _central_tickets_table_exists() -> bool:
         return False
 
 
+def _central_attachments_table_exists() -> bool:
+    try:
+        if db.backend == "supabase-postgresql":
+            row = db.one("SELECT to_regclass('public.ticket_attachments') IS NOT NULL AS ready")
+            return bool(row and row.get("ready"))
+        row = db.one("SELECT name FROM sqlite_master WHERE type='table' AND name='ticket_attachments'")
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _central_attachments_by_ticket(ticket_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    if not ticket_ids or not _central_attachments_table_exists():
+        return {}
+    placeholders = ",".join(["?"] * len(ticket_ids))
+    rows = db.all(
+        f"SELECT id, ticket_id, file_name, file_url, file_type, file_size_bytes, created_at "
+        f"FROM ticket_attachments WHERE ticket_id IN ({placeholders}) ORDER BY created_at ASC",
+        tuple(ticket_ids),
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for att in rows:
+        tid = str(att.get("ticket_id") or "")
+        aid = str(att.get("id") or "")
+        mime = str(att.get("file_type") or "application/octet-stream")
+        grouped.setdefault(tid, []).append({
+            "id": aid,
+            "file_name": att.get("file_name") or "attachment",
+            "file_type": mime,
+            "file_size_bytes": int(att.get("file_size_bytes") or 0),
+            "is_image": mime.lower().startswith("image/"),
+            "view_url": f"/api/v1/operator/tickets/{tid}/attachments/{aid}",
+            "download_url": f"/api/v1/operator/tickets/{tid}/attachments/{aid}?download=1",
+            "created_at": _iso_str(att.get("created_at")),
+        })
+    return grouped
+
+
+def _fetch_ticket_attachment_bytes(att: dict[str, Any]) -> tuple[bytes, str]:
+    file_url = str(att.get("file_url") or "").strip()
+    file_name = str(att.get("file_name") or "attachment")
+    fallback_mime = str(att.get("file_type") or mimetypes.guess_type(file_name)[0] or "application/octet-stream")
+
+    if file_url.startswith("/assets/") and settings.supabase_url and settings.supabase_service_role_key:
+        object_key = file_url[len("/assets/"):].lstrip("/")
+        encoded = urllib.parse.quote(object_key, safe="/")
+        storage_url = f"{settings.supabase_url}/storage/v1/object/ticket-assets/{encoded}"
+        req = urllib.request.Request(
+            storage_url,
+            method="GET",
+            headers={
+                "Authorization": f"Bearer {settings.supabase_service_role_key}",
+                "apikey": settings.supabase_service_role_key,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                ct = resp.headers.get("Content-Type") or fallback_mime
+                return resp.read(), ct
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise HTTPException(502, "Could not fetch attachment from Supabase storage.") from exc
+        except Exception:
+            pass
+
+    if file_url.startswith(("http://", "https://")):
+        target_url = file_url
+    elif file_url.startswith("/") and settings.ticket_center_url:
+        target_url = f"{settings.ticket_center_url}{file_url}"
+    else:
+        raise HTTPException(404, "Attachment file is unavailable.")
+
+    try:
+        with urllib.request.urlopen(urllib.request.Request(target_url, method="GET"), timeout=25) as resp:
+            ct = resp.headers.get("Content-Type") or fallback_mime
+            return resp.read(), ct
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise HTTPException(404, "Attachment not found.") from exc
+        raise HTTPException(502, "Could not download attachment from storage.") from exc
+    except Exception as exc:
+        raise HTTPException(502, "Attachment storage is currently unavailable.") from exc
+
+
 def _iso_str(value: Any) -> str:
     if value is None:
         return ""
@@ -753,7 +840,7 @@ def _iso_str(value: Any) -> str:
     return str(value)
 
 
-def _map_central_ticket(row: dict[str, Any]) -> dict[str, Any]:
+def _map_central_ticket(row: dict[str, Any], attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     raw_status = str(row.get("status") or "NEW").upper()
     build_tag = str(row.get("fixed_in_build") or "").strip().lower()
     if raw_status == "CLOSED":
@@ -791,6 +878,7 @@ def _map_central_ticket(row: dict[str, Any]) -> dict[str, Any]:
         "approved_by": row.get("reporter_email") or "",
         "client_name": row.get("workspace_id") or row.get("source") or "Ticket Center",
         "assigned_dev_id": row.get("assigned_dev_id"),
+        "attachments": attachments if attachments is not None else [],
         "created_at": _iso_str(row.get("created_at")),
         "updated_at": _iso_str(row.get("updated_at")),
         "source_type": "ticket_center",
@@ -814,7 +902,8 @@ def _central_ticket_rows(status: str | None = None, limit: int | None = None) ->
     if limit is not None:
         query += f" LIMIT {int(limit)}"
     rows = db.all(query, tuple(params))
-    return [_map_central_ticket(row) for row in rows]
+    attachments_map = _central_attachments_by_ticket([str(r["id"]) for r in rows])
+    return [_map_central_ticket(row, attachments=attachments_map.get(str(row["id"]), [])) for row in rows]
 
 
 @app.get("/api/v1/operator/summary")
@@ -1645,7 +1734,34 @@ def decide_central_ticket(ticket_id: str, payload: TicketDecision, actor: Operat
     )
     db.audit(str(actor), f"ticket.{payload.decision}", "ticket", ticket_id, details={"decision": payload.decision, "notes": notes, "status": new_status})
     updated = db.one("SELECT * FROM tickets WHERE id=?", (ticket_id,))
-    return {"ticket": _map_central_ticket(updated)}
+    attachments_map = _central_attachments_by_ticket([ticket_id])
+    return {"ticket": _map_central_ticket(updated, attachments=attachments_map.get(ticket_id, []))}
+
+
+@app.get("/api/v1/operator/tickets/{ticket_id}/attachments/{attachment_id}")
+def download_central_ticket_attachment(
+    ticket_id: str,
+    attachment_id: str,
+    download: int = Query(default=0),
+    _: str = Depends(require_operator),
+):
+    if not _central_attachments_table_exists():
+        raise HTTPException(404, "Ticket attachments table is not configured.")
+    att = db.one(
+        "SELECT id, ticket_id, file_name, file_url, file_type, file_size_bytes FROM ticket_attachments WHERE id=? AND ticket_id=?",
+        (attachment_id, ticket_id),
+    )
+    if not att:
+        raise HTTPException(404, "Ticket attachment not found.")
+    content, media_type = _fetch_ticket_attachment_bytes(att)
+    raw_name = str(att.get("file_name") or "attachment")
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(raw_name).name)[:180] or "attachment"
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'{disposition}; filename="{safe_name}"'},
+    )
 
 
 @app.get("/api/v1/operator/audit")

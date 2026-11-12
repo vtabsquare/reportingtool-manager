@@ -48,6 +48,8 @@ class Settings:
     open_browser: bool = os.getenv("VTAB_MANAGER_OPEN_BROWSER", "1") == "1"
     ticket_center_url: str = os.getenv("VTAB_TICKET_CENTER_URL", "https://ticketing.139.59.32.39.nip.io").rstrip("/")
     ticket_integration_key: str = os.getenv("VTAB_TICKET_INTEGRATION_KEY", "").strip()
+    supabase_url: str = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
     @property
     def development(self) -> bool:

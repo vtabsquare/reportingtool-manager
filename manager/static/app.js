@@ -186,7 +186,15 @@ function clientActions(row){return `<div class="row-actions client-controls">${a
 function clientTable(rows){if(!rows.length)return empty('No client environments registered.',`<button class="text-action" data-open-deployment>Register one in a deployment</button>`);if(state.clientView==='table')return `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Environment</th><th>Database</th><th>Health</th><th>Services</th><th>Admin</th><th></th></tr></thead><tbody>${rows.map(row=>`<tr><td><div class="client-name"><span class="client-logo">${esc(row.name[0])}</span><div><strong>${esc(row.name)}</strong><small>${esc(row.code)}</small></div></div></td><td>${badge(row.environment)}</td><td>${esc(row.database_provider)}</td><td><span class="health ${esc(row.last_health_status)}"><i></i>${esc(row.last_health_status)}</span></td><td>${esc(row.installed_services_version||'Not reported')}</td><td>${esc(row.installed_admin_version||'Not reported')}</td><td>${clientActions(row)}</td></tr>`).join('')}</tbody></table></div>`;return `<div class="client-card-grid">${rows.map(row=>`<article class="client-card"><div class="client-card-top"><span class="client-logo large">${esc(row.name[0])}</span><div><h3>${esc(row.name)}</h3><p>${esc(row.code)}</p></div>${badge(row.environment)}</div><div class="client-health"><span class="health ${esc(row.last_health_status)}"><i></i>${esc(row.last_health_status)}</span><small>${esc(row.database_provider)}</small></div><dl><div><dt>Reporting Services</dt><dd>${esc(row.installed_services_version||'Not reported')}</dd></div><div><dt>Administration</dt><dd>${esc(row.installed_admin_version||'Not reported')}</dd></div></dl>${clientActions(row)}</article>`).join('')}</div>`}
 
 function renderTickets(){return `${viewTitle('Support tickets','Review issues, mark Blocked or Approved with notes, and track Administrator closure')}${panel('All tickets','Live tickets fetched from Supabase',ticketTable(state.tickets,false),'','<button class="secondary view-action" onclick="openTicketCenter()">Open Ticket Center</button>')}`}
-function ticketTable(rows,compact){if(!rows.length)return empty('No tickets found.');return `<div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Client / App</th><th>Issue & Notes</th><th>Severity</th><th>Status</th>${compact?'':'<th>Reporter / Approved by</th><th>Manage</th>'}</tr></thead><tbody>${rows.map(row=>{const statusText=row.display_status||row.status;const notesParts=[];if(row.manager_notes)notesParts.push(`Manager: ${row.manager_notes}`);if(row.admin_notes)notesParts.push(`Admin: ${row.admin_notes}`);const isClosed=String(row.status||'').toUpperCase()==='CLOSED';return `<tr><td><strong>${esc(row.external_number)}</strong><small>${stamp(row.created_at)}</small></td><td>${esc(row.client_name)}</td><td><strong>${esc(row.title)}</strong><small>${esc(row.component)}${row.summary?` — ${esc(row.summary.slice(0,90))}`:''}</small>${notesParts.length?`<small style="display:block;margin-top:4px;color:var(--accent,#38bdf8)">${esc(notesParts.join(' · '))}</small>`:''}</td><td>${badge(row.severity)}</td><td>${badge(statusText)}</td>${compact?'':`<td>${esc(row.approved_by)}</td><td>${row.source_type==='ticket_center'?(isClosed?`<span class="muted">Closed by Admin</span>`:`<div class="row-actions"><button class="primary" type="button" data-ticket-decision="approved" data-ticket-id="${esc(row.id)}">Approved</button><button class="secondary" type="button" data-ticket-decision="blocked" data-ticket-id="${esc(row.id)}">Blocked</button></div>`):`<select class="ticket-status compact-select" data-ticket="${row.id}">${['escalated','triaged','in_progress','fix_available','deployed','closed'].map(value=>`<option ${row.status===value?'selected':''}>${value}</option>`).join('')}</select>`}</td>`}</tr>`}).join('')}</tbody></table></div>`}
+function ticketAttachmentCell(row){
+  const atts=row.attachments||[];
+  if(!atts.length)return '<span class="muted">—</span>';
+  return `<div style="display:flex;flex-direction:column;gap:6px">${atts.map(att=>{
+    const kb=att.file_size_bytes?` (${Math.max(1,Math.round(att.file_size_bytes/1024))} KB)`:'';
+    return `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span style="font-size:12px">${esc(att.file_name)}${esc(kb)}</span>${att.is_image?`<button class="secondary" type="button" style="padding:3px 8px;font-size:11px" data-view-attachment="${esc(att.id)}" data-ticket-id="${esc(row.id)}" data-file-name="${esc(att.file_name)}" data-file-type="${esc(att.file_type)}">View</button>`:''}<button class="secondary" type="button" style="padding:3px 8px;font-size:11px" data-download-attachment="${esc(att.id)}" data-ticket-id="${esc(row.id)}" data-file-name="${esc(att.file_name)}">Download</button></div>`;
+  }).join('')}</div>`;
+}
+function ticketTable(rows,compact){if(!rows.length)return empty('No tickets found.');return `<div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Client / App</th><th>Issue & Notes</th><th>Severity</th><th>Status</th>${compact?'':'<th>Attachments</th><th>Reporter / Approved by</th><th>Manage</th>'}</tr></thead><tbody>${rows.map(row=>{const statusText=row.display_status||row.status;const notesParts=[];if(row.manager_notes)notesParts.push(`Manager: ${row.manager_notes}`);if(row.admin_notes)notesParts.push(`Admin: ${row.admin_notes}`);const isClosed=String(row.status||'').toUpperCase()==='CLOSED';return `<tr><td><strong>${esc(row.external_number)}</strong><small>${stamp(row.created_at)}</small></td><td>${esc(row.client_name)}</td><td><strong>${esc(row.title)}</strong><small>${esc(row.component)}${row.summary?` — ${esc(row.summary.slice(0,90))}`:''}</small>${notesParts.length?`<small style="display:block;margin-top:4px;color:var(--accent,#38bdf8)">${esc(notesParts.join(' · '))}</small>`:''}</td><td>${badge(row.severity)}</td><td>${badge(statusText)}</td>${compact?'':`<td>${ticketAttachmentCell(row)}</td><td>${esc(row.approved_by)}</td><td>${row.source_type==='ticket_center'?(isClosed?`<span class="muted">Closed by Admin</span>`:`<div class="row-actions"><button class="primary" type="button" data-ticket-decision="approved" data-ticket-id="${esc(row.id)}">Approved</button><button class="secondary" type="button" data-ticket-decision="blocked" data-ticket-id="${esc(row.id)}">Blocked</button></div>`):`<select class="ticket-status compact-select" data-ticket="${row.id}">${['escalated','triaged','in_progress','fix_available','deployed','closed'].map(value=>`<option ${row.status===value?'selected':''}>${value}</option>`).join('')}</select>`}</td>`}</tr>`}).join('')}</tbody></table></div>`}
 
 function renderSettings(){
   const theme=document.documentElement.dataset.theme;const github=state.settings.github||{};const repositories=state.settings.repositories||{};const server=state.settings.server||{};const supabase=state.settings.storageBackend==='supabase-postgresql';
@@ -224,6 +232,8 @@ function bindActions(){
   const insertEnvBtn=$('insertConnectorVars');if(insertEnvBtn)insertEnvBtn.onclick=insertConnectorVariables;
   document.querySelectorAll('.ticket-status').forEach(select=>select.onchange=()=>updateTicket(select.dataset.ticket,select.value));
   document.querySelectorAll('[data-ticket-decision]').forEach(button=>button.onclick=()=>openTicketDecision(button.dataset.ticketId,button.dataset.ticketDecision));
+  document.querySelectorAll('[data-view-attachment]').forEach(button=>button.onclick=()=>viewTicketAttachment(button.dataset.ticketId,button.dataset.viewAttachment,button.dataset.fileName,button.dataset.fileType));
+  document.querySelectorAll('[data-download-attachment]').forEach(button=>button.onclick=()=>downloadTicketAttachment(button.dataset.ticketId,button.dataset.downloadAttachment,button.dataset.fileName));
   document.querySelectorAll('[data-theme-choice]').forEach(button=>button.onclick=()=>applyTheme(button.dataset.themeChoice));
   document.querySelectorAll('[data-close-dialog]').forEach(button=>button.onclick=()=>button.closest('dialog').close());
   document.querySelectorAll('[data-go-settings]').forEach(button=>button.onclick=()=>setView('settings'));
@@ -624,6 +634,54 @@ async function wizardContinue(){
 async function publishRelease(id){try{await api(`/api/v1/operator/releases/${id}/publish`,{method:'POST'});notify('Release published and ready for deployment.');await loadAll()}catch(error){notify(error.message,true)}}
 async function approveDeployment(id){const approved_by=prompt('Client administrator who approved this deployment:');if(!approved_by)return;try{await api(`/api/v1/operator/deployments/${id}/approve`,{method:'POST',body:JSON.stringify({approved_by})});notify('Deployment approved and available to the connector.');await loadAll()}catch(error){notify(error.message,true)}}
 async function updateTicket(id,status){try{await api(`/api/v1/operator/tickets/${id}`,{method:'PATCH',body:JSON.stringify({status})});notify('Ticket status updated.');await loadAll()}catch(error){notify(error.message,true)}}
+async function fetchTicketAttachmentBlob(ticketId,attId,download=false){
+  const res=await fetch(`/api/v1/operator/tickets/${encodeURIComponent(ticketId)}/attachments/${encodeURIComponent(attId)}${download?'?download=1':''}`,{
+    cache:'no-store',
+    headers:{'X-VTAB-Manager-Key':state.key}
+  });
+  if(!res.ok){
+    const err=await res.json().catch(()=>({}));
+    throw new Error(err.detail||`Failed to load attachment (${res.status})`);
+  }
+  return await res.blob();
+}
+async function downloadTicketAttachment(ticketId,attId,fileName){
+  try{
+    const blob=await fetchTicketAttachmentBlob(ticketId,attId,true);
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;
+    a.download=fileName||'attachment';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
+  }catch(error){
+    notify(error.message,true);
+  }
+}
+let _activeAttachmentUrl='';
+async function viewTicketAttachment(ticketId,attId,fileName,fileType){
+  try{
+    const blob=await fetchTicketAttachmentBlob(ticketId,attId,false);
+    if(_activeAttachmentUrl){URL.revokeObjectURL(_activeAttachmentUrl);_activeAttachmentUrl='';}
+    const url=URL.createObjectURL(blob);
+    _activeAttachmentUrl=url;
+    $('ticketAttachmentTitle').textContent=fileName||'Attachment preview';
+    $('ticketAttachmentMeta').textContent=String(fileType||'ATTACHMENT').toUpperCase();
+    const body=$('ticketAttachmentBody');
+    if(String(fileType||blob.type||'').startsWith('image/')){
+      body.innerHTML=`<img src="${url}" alt="${esc(fileName||'Attachment')}" style="max-width:100%;max-height:70vh;border-radius:10px;border:1px solid var(--border,#273647)">`;
+    }else{
+      body.innerHTML=`<p class="muted">Preview is unavailable for this file type. Click Download to save ${esc(fileName||'file')}.</p>`;
+    }
+    const dl=$('ticketAttachmentDownload');
+    if(dl)dl.onclick=()=>downloadTicketAttachment(ticketId,attId,fileName);
+    openDialog('ticketAttachmentDialog');
+  }catch(error){
+    notify(error.message,true);
+  }
+}
 function openTicketDecision(id,decision){
   const ticket=(state.tickets||[]).find(row=>row.id===id);
   if(!ticket)return;
