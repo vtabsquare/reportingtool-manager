@@ -46,7 +46,7 @@ class Settings:
     health_timeout_seconds: int = int(os.getenv("VTAB_DEPLOYMENT_HEALTH_TIMEOUT_SECONDS", "600"))
     update_poll_interval_seconds: int = int(os.getenv("VTAB_UPDATE_POLL_INTERVAL_SECONDS", "300"))
     open_browser: bool = os.getenv("VTAB_MANAGER_OPEN_BROWSER", "1") == "1"
-    ticket_center_url: str = os.getenv("VTAB_TICKET_CENTER_URL", "http://127.0.0.1:8860").rstrip("/")
+    ticket_center_url: str = os.getenv("VTAB_TICKET_CENTER_URL", "https://ticketing.vtabsquare.com").rstrip("/")
     ticket_integration_key: str = os.getenv("VTAB_TICKET_INTEGRATION_KEY", "").strip()
 
     @property
